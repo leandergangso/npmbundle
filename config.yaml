@@ -1,0 +1,18 @@
+storage: /verdaccio/storage
+plugins: /verdaccio/plugins
+
+auth:
+  htpasswd:
+    file: /verdaccio/conf/htpasswd
+    max_users: 1000
+
+web:
+  title: Verdaccio
+
+packages:
+  "**":
+    access: $all
+    publish: $all
+    unpublish: $all
+
+log: { type: stdout, format: pretty, level: http }
