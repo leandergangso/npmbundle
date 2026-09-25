@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,6 +33,7 @@ var (
 	flagConcurrent *bool
 	flagIncludeDev *bool
 	flagUseIndent  *bool
+	flagOffline    *bool
 )
 
 type NpmPackage struct {
@@ -71,6 +75,7 @@ func run(ctx context.Context) error {
 	flagConcurrent = fs.Bool("concurrent", false, "Enable concurrent downloads and dependency traversal")
 	flagIncludeDev = fs.Bool("dev", false, "Include devDependencies. Warning: this will take a long time to bundle!")
 	flagUseIndent = fs.Bool("indent", false, "Print with indent to see package hierarchy")
+	flagOffline = fs.Bool("offline", false, "Sanitize package.json (remove scripts, repository, etc.) for airgapped environments")
 
 	err := fs.Parse(os.Args[1:])
 	if err != nil {
@@ -165,9 +170,20 @@ func handleDeps(ctx context.Context, pkg NpmPackage, depth int) error {
 	printMu.Unlock()
 
 	if *flagOutputDir != "" {
-		err := fetchOutputTarball(pkg, *flagOutputDir)
+		outPath, err := fetchOutputTarball(pkg, *flagOutputDir)
 		if err != nil {
 			return fmt.Errorf("failed to generate tarball for %s: %w", pkg.Name+"@"+pkg.Version, err)
+		}
+		if *flagOffline {
+			tempPath := outPath + ".tmp"
+			err = sanitizeTarball(outPath, tempPath)
+			if err != nil {
+				return fmt.Errorf("failed to sanitize tarball '%s' for offline use: %w", outPath, err)
+			}
+			err = os.Rename(tempPath, outPath)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -216,9 +232,9 @@ func handleDeps(ctx context.Context, pkg NpmPackage, depth int) error {
 }
 
 // fetchOutputTarball downloads and saves the tarball for a given package version.
-func fetchOutputTarball(pkg NpmPackage, outputDir string) error {
+func fetchOutputTarball(pkg NpmPackage, outputDir string) (string, error) {
 	if pkg.Dist.Tarball == "" {
-		return fmt.Errorf("tarball URL is empty for: %s@%s", pkg.Name, pkg.Version)
+		return "", fmt.Errorf("tarball URL is empty for: %s@%s", pkg.Name, pkg.Version)
 	}
 
 	cleanName := strings.TrimPrefix(pkg.Name, "@")
@@ -227,42 +243,42 @@ func fetchOutputTarball(pkg NpmPackage, outputDir string) error {
 	destPath := filepath.Join(outputDir, filename)
 
 	if _, err := os.Stat(destPath); err == nil {
-		return nil // already fetched
+		return destPath, nil // already fetched
 	}
 
 	err := os.MkdirAll(outputDir, 0755)
 	if err != nil {
-		return fmt.Errorf("failed to create output directory: %w", err)
+		return "", fmt.Errorf("failed to create output directory: %w", err)
 	}
 
 	u, err := url.Parse(pkg.Dist.Tarball)
 	if err != nil {
-		return fmt.Errorf("invalid URL %s: %w", pkg.Dist.Tarball, err)
+		return "", fmt.Errorf("invalid URL %s: %w", pkg.Dist.Tarball, err)
 	}
 	secureURL := u.String()
 
 	resp, err := http.Get(secureURL)
 	if err != nil {
-		return fmt.Errorf("failed to download tarball from %s: %w", secureURL, err)
+		return "", fmt.Errorf("failed to download tarball from %s: %w", secureURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("received non-200 status code (%s) for %s", resp.Status, secureURL)
+		return "", fmt.Errorf("received non-200 status code (%s) for %s", resp.Status, secureURL)
 	}
 
 	out, err := os.Create(destPath)
 	if err != nil {
-		return fmt.Errorf("failed to create file %s: %w", destPath, err)
+		return "", fmt.Errorf("failed to create file %s: %w", destPath, err)
 	}
 	defer out.Close()
 
 	_, err = io.Copy(out, resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to write download data: %w", err)
+		return "", fmt.Errorf("failed to write download data: %w", err)
 	}
 
-	return nil
+	return destPath, nil
 }
 
 type FullRegistryResponse struct {
@@ -366,4 +382,96 @@ func parsePkgSpec(pkgStr string) (string, string) {
 		return parts[0], "latest"
 	}
 	return parts[0], parts[1]
+}
+
+// sanitizeTarball reads a .tgz file, strips unwanted keys from package/package.json,
+// and writes a new sanitized .tgz file to the destination path.
+func sanitizeTarball(srcPath, destPath string) error {
+	file, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	gzr, err := gzip.NewReader(file)
+	if err != nil {
+		return err
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+
+	outFile, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer outFile.Close()
+
+	gzw := gzip.NewWriter(outFile)
+	defer gzw.Close()
+
+	tw := tar.NewWriter(gzw)
+	defer tw.Close()
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		cleanName := path.Clean(header.Name)
+		parts := strings.Split(cleanName, "/")
+
+		// A root package.json will have either:
+		// 1. len == 1: "package.json" (flat archive)
+		// 2. len == 2: "package/package.json" or "lodash-4.17.21/package.json" (standard top-level folder)
+		isRootPackageJSON := false
+		if (len(parts) == 1 && parts[0] == "package.json") || (len(parts) == 2 && parts[1] == "package.json") {
+			isRootPackageJSON = true
+		}
+
+		if isRootPackageJSON {
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return err
+			}
+
+			var pkg map[string]any
+			if err := json.Unmarshal(data, &pkg); err != nil {
+				return err
+			}
+
+			delete(pkg, "scripts")
+			delete(pkg, "repository")
+			delete(pkg, "bugs")
+			delete(pkg, "homepage")
+			delete(pkg, "funding")
+			delete(pkg, "publishConfig")
+
+			newData, err := json.MarshalIndent(pkg, "", "  ")
+			if err != nil {
+				return err
+			}
+
+			header.Size = int64(len(newData))
+			if err := tw.WriteHeader(header); err != nil {
+				return err
+			}
+			if _, err := tw.Write(newData); err != nil {
+				return err
+			}
+		} else {
+			if err := tw.WriteHeader(header); err != nil {
+				return err
+			}
+			if _, err := io.Copy(tw, tr); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
