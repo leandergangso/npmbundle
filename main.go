@@ -23,7 +23,7 @@ var (
 	printMu  sync.Mutex
 	seenPkgs = make(map[string]struct{})
 
-	flagHelp = errors.New("flag help")
+	errFlagHelp = errors.New("flag help")
 
 	flagOutputDir  *string
 	flagConcurrent *bool
@@ -52,7 +52,7 @@ func main() {
 	ctx := context.Background()
 	err := run(ctx)
 	if err != nil {
-		if errors.Is(err, flagHelp) {
+		if errors.Is(err, errFlagHelp) {
 			return // flag help output
 		}
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -65,14 +65,14 @@ func main() {
 func run(ctx context.Context) error {
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 
-	flagOutputDir = fs.String("output", "./npm-bundle", "Target directory for downloaded tarballs")
+	flagOutputDir = fs.String("output", "./npm-bundle", "Target directory for downloaded tarballs (set to empty to omit building output)")
 	flagConcurrent = fs.Bool("concurrent", false, "Enable concurrent downloads and dependency traversal")
 	flagIncludeDev = fs.Bool("dev", false, "Include devDependencies. Warning: this will take a long time to bundle!")
 	flagUseIndent = fs.Bool("indent", false, "Print with indent to see package hierarchy")
 
 	err := fs.Parse(os.Args[1:])
 	if err != nil {
-		return flagHelp
+		return errFlagHelp
 	}
 
 	args := fs.Args()
@@ -162,9 +162,11 @@ func handleDeps(ctx context.Context, pkg NpmPackage, depth int) error {
 	}
 	printMu.Unlock()
 
-	err := outputTarball(pkg, *flagOutputDir)
-	if err != nil {
-		return fmt.Errorf("failed to generate tarball for %s: %w", pkg.Name+"@"+pkg.Version, err)
+	if *flagOutputDir == "" {
+		err := fetchOutputTarball(pkg, *flagOutputDir)
+		if err != nil {
+			return fmt.Errorf("failed to generate tarball for %s: %w", pkg.Name+"@"+pkg.Version, err)
+		}
 	}
 
 	allDependencies := make(map[string]string)
@@ -202,7 +204,7 @@ func handleDeps(ctx context.Context, pkg NpmPackage, depth int) error {
 	var errs error
 	for name, version := range allDependencies {
 		pkgStr := fmt.Sprintf("%s@%s", name, version)
-		err = handleNpmPkg(ctx, pkgStr, depth+1)
+		err := handleNpmPkg(ctx, pkgStr, depth+1)
 		if err != nil {
 			errs = errors.Join(errs, err)
 		}
@@ -211,8 +213,8 @@ func handleDeps(ctx context.Context, pkg NpmPackage, depth int) error {
 	return errs
 }
 
-// outputTarball downloads and saves the tarball for a given package version.
-func outputTarball(pkg NpmPackage, outputDir string) error {
+// fetchOutputTarball downloads and saves the tarball for a given package version.
+func fetchOutputTarball(pkg NpmPackage, outputDir string) error {
 	if pkg.Dist.Tarball == "" {
 		return fmt.Errorf("tarball URL is empty for: %s@%s", pkg.Name, pkg.Version)
 	}
