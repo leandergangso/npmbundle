@@ -1,6 +1,8 @@
 storage: /verdaccio/storage
 plugins: /verdaccio/plugins
 
+max_body_size: 500mb
+
 auth:
   htpasswd:
     file: /verdaccio/conf/htpasswd

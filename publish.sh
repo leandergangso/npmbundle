@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-for tarball in result/tarballs/*.tgz; do
-  echo "Publishing $tarball..."
-  npm publish "$tarball" || echo "Skipped (already exists)"
+for pkg in ./npm-bundle/*.tgz; do
+  npm publish "$pkg" --registry http://127.0.0.1:4873 --access public
 done
