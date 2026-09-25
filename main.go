@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
 )
@@ -49,6 +50,7 @@ type NpmDist struct {
 
 // main is the entry point of the application.
 func main() {
+	now := time.Now()
 	ctx := context.Background()
 	err := run(ctx)
 	if err != nil {
@@ -58,7 +60,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-	fmt.Fprintln(os.Stdout, "Finished")
+	fmt.Fprintf(os.Stdout, "\nFinished in %.2fs\n", time.Since(now).Seconds())
 }
 
 // run parses command-line flags and dispatches execution to file or package handlers.
@@ -162,7 +164,7 @@ func handleDeps(ctx context.Context, pkg NpmPackage, depth int) error {
 	}
 	printMu.Unlock()
 
-	if *flagOutputDir == "" {
+	if *flagOutputDir != "" {
 		err := fetchOutputTarball(pkg, *flagOutputDir)
 		if err != nil {
 			return fmt.Errorf("failed to generate tarball for %s: %w", pkg.Name+"@"+pkg.Version, err)
