@@ -42,9 +42,9 @@ var (
 	flagOutputDir  string
 	flagConcurrent bool
 	flagIncludeDev bool
-	flagUseIndent  bool
 	flagSanitize   bool
 	flagNoColor    bool
+	flagUseTree    bool
 )
 
 type NpmPackage struct {
@@ -90,9 +90,9 @@ func run(ctx context.Context) error {
 	fs.StringVar(&flagOutputDir, "output", "./npmpkgs", "Target directory for tarballs (set to \"\" for preview mode)")
 	fs.BoolVar(&flagConcurrent, "concurrent", false, "Enable concurrent package downloads")
 	fs.BoolVar(&flagIncludeDev, "dev", false, "Include devDependencies. Warning: this will take a long time to bundle!")
-	fs.BoolVar(&flagUseIndent, "indent", false, "Use nested indentation to deosplay package hierarchy")
 	fs.BoolVar(&flagSanitize, "sanitize", false, "Sanitize package.json (removes scripts, repository, etc.)")
 	fs.BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
+	fs.BoolVar(&flagUseTree, "tree", false, "Display package hierarchy as a nested tree")
 
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s %s — Bundle npm packages and their entire dependency tree.\n\n", program, version)
@@ -101,7 +101,7 @@ func run(ctx context.Context) error {
 		fmt.Fprintf(fs.Output(), "  %s [flags] <packages.txt | pkg@version...>\n\n", program)
 
 		fmt.Fprintf(fs.Output(), "Examples:\n")
-		fmt.Fprintf(fs.Output(), "  %s -indent lodash@4.17.21\n", program)
+		fmt.Fprintf(fs.Output(), "  %s -tree lodash@4.17.21\n", program)
 		fmt.Fprintf(fs.Output(), "  %s -sanitize ./packages.txt\n\n", program)
 
 		fmt.Fprintf(fs.Output(), "Flags:\n")
@@ -196,7 +196,7 @@ func handleNpmPkg(ctx context.Context, pkgStr string, depth int) error {
 	printMu.Lock()
 	if depth == 0 {
 		fmt.Printf("processing: %s %s\n", nameVer, meta)
-	} else if flagUseIndent {
+	} else if flagUseTree {
 		indent := strings.Repeat("  ", depth)
 		fmt.Printf("%s%s %s\n", indent, nameVer, meta)
 	} else {
