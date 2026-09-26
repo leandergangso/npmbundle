@@ -86,13 +86,6 @@ func main() {
 func run(ctx context.Context) error {
 	fs := flag.NewFlagSet(program, flag.ExitOnError)
 
-	fs.StringVar(&flagOutputDir, "output", "./npmpkgs", "Target directory for tarballs (set to \"\" for preview mode)")
-	fs.BoolVar(&flagConcurrent, "concurrent", false, "Enable concurrent package downloads")
-	fs.BoolVar(&flagIncludeDev, "dev", false, "Include devDependencies. Warning: this will take a long time to bundle!")
-	fs.BoolVar(&flagSanitize, "sanitize", false, "Sanitize package.json (removes scripts, repository, etc.)")
-	fs.BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
-	fs.BoolVar(&flagUseTree, "tree", false, "Display package hierarchy as a nested tree")
-
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s %s — Bundle npm packages and their entire dependency tree.\n\n", program, version)
 
@@ -107,12 +100,28 @@ func run(ctx context.Context) error {
 		fs.PrintDefaults()
 	}
 
+	fs.StringVar(&flagOutputDir, "output", "./npmpkgs", "Target directory for tarballs (set to \"\" for preview mode)")
+	fs.BoolVar(&flagConcurrent, "concurrent", false, "Enable concurrent package downloads")
+	fs.BoolVar(&flagIncludeDev, "dev", false, "Include devDependencies. Warning: this will take a long time to bundle!")
+	fs.BoolVar(&flagSanitize, "sanitize", false, "Sanitize package.json (removes scripts, repository, etc.)")
+	fs.BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
+	fs.BoolVar(&flagUseTree, "tree", false, "Display package hierarchy as a nested tree")
+
 	_ = fs.Parse(os.Args[1:])
 
 	args := fs.Args()
 	if len(args) == 0 {
 		fs.Usage()
 		os.Exit(2)
+	}
+
+	if flagIncludeDev && flagConcurrent {
+		flagConcurrent = false
+		fmt.Fprintln(os.Stderr, "NOTICE: concurrency is disabled when using -dev")
+	}
+	if flagUseTree && flagConcurrent {
+		flagConcurrent = false
+		fmt.Fprintln(os.Stderr, "NOTICE: concurrency is disabled when using -tree")
 	}
 
 	var errs error
@@ -291,7 +300,17 @@ func fetchOutputTarball(pkg NpmPackage, outputDir string) (string, error) {
 		return "", fmt.Errorf("tarball URL is empty for: %s@%s", pkg.Name, pkg.Version)
 	}
 
-	err := os.MkdirAll(outputDir, 0755)
+	cleanName := strings.TrimPrefix(pkg.Name, "@")
+	cleanName = strings.ReplaceAll(cleanName, "/", "-")
+	filename := fmt.Sprintf("%s-%s.tgz", cleanName, pkg.Version)
+	destPath := filepath.Join(outputDir, filename)
+
+	_, err := os.Stat(destPath)
+	if err == nil {
+		return destPath, nil // file exists
+	}
+
+	err = os.MkdirAll(outputDir, 0755)
 	if err != nil {
 		return "", fmt.Errorf("failed to create output directory: %w", err)
 	}
@@ -311,11 +330,6 @@ func fetchOutputTarball(pkg NpmPackage, outputDir string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("received non-200 status code (%s) for %s", resp.Status, secureURL)
 	}
-
-	cleanName := strings.TrimPrefix(pkg.Name, "@")
-	cleanName = strings.ReplaceAll(cleanName, "/", "-")
-	filename := fmt.Sprintf("%s-%s.tgz", cleanName, pkg.Version)
-	destPath := filepath.Join(outputDir, filename)
 
 	out, err := os.Create(destPath)
 	if err != nil {
