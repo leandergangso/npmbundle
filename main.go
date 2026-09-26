@@ -430,6 +430,11 @@ func sanitizeTarball(srcPath, destPath string) error {
 			return err
 		}
 
+		// fix for some older .tgz npm package practises
+		if header.Typeflag == tar.TypeDir {
+			header.Mode |= 0755 // add permissions without removing what is already set
+		}
+
 		cleanName := path.Clean(header.Name)
 		parts := strings.Split(cleanName, "/")
 
