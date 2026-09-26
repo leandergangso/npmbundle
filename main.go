@@ -20,26 +20,37 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"golang.org/x/term"
+)
+
+const (
+	ansiReset = "\033[0m"
+	ansiDim   = "\033[2m"
+	ansiCyan  = "\033[36m"
 )
 
 var (
+	program string = "npmpack" // should match go.mod module
+	version string = "dev"     // -X main.version="1.0.0"
+
 	fileMu   sync.Mutex
 	seenMu   sync.Mutex
 	printMu  sync.Mutex
 	seenPkgs = make(map[string]struct{})
+	sem      = make(chan struct{}, 10)
 
-	errFlagHelp = errors.New("flag help")
-
-	flagOutputDir  *string
-	flagConcurrent *bool
-	flagIncludeDev *bool
-	flagUseIndent  *bool
-	flagOffline    *bool
+	flagOutputDir  string
+	flagConcurrent bool
+	flagIncludeDev bool
+	flagUseIndent  bool
+	flagOffline    bool
+	flagNoColor    bool
 )
 
 type NpmPackage struct {
 	Name                 string            `json:"name"`
 	Version              string            `json:"version"`
+	License              string            `json:"license"`
 	Dist                 NpmDist           `json:"dist"`
 	Dependencies         map[string]string `json:"dependencies"`
 	DevDependencies      map[string]string `json:"devDependencies"`
@@ -48,9 +59,10 @@ type NpmPackage struct {
 }
 
 type NpmDist struct {
-	Tarball   string `json:"tarball"`
-	Integrity string `json:"integrity"`
-	Shasum    string `json:"shasum"`
+	Tarball      string `json:"tarball"`
+	Integrity    string `json:"integrity"`
+	Shasum       string `json:"shasum"`
+	UnpackedSize int64  `json:"unpackedSize"`
 }
 
 // main is the entry point of the application.
@@ -59,33 +71,49 @@ func main() {
 	ctx := context.Background()
 	err := run(ctx)
 	if err != nil {
-		if errors.Is(err, errFlagHelp) {
-			return // flag help output
-		}
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stdout, "\nFinished in %.2fs\n", time.Since(now).Seconds())
+
+	if flagOutputDir == "" {
+		fmt.Fprintf(os.Stderr, "\nFinished in %.2fs\n", time.Since(now).Seconds())
+	} else {
+		count := len(seenPkgs)
+		fmt.Fprintf(os.Stderr, "\nSuccessfully bundled %d packages in %.2fs\n", count, time.Since(now).Seconds())
+	}
 }
 
 // run parses command-line flags and dispatches execution to file or package handlers.
 func run(ctx context.Context) error {
-	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs := flag.NewFlagSet(program, flag.ExitOnError)
 
-	flagOutputDir = fs.String("output", "./npm-bundle", "Target directory for downloaded tarballs (set to empty to omit building output)")
-	flagConcurrent = fs.Bool("concurrent", false, "Enable concurrent downloads and dependency traversal")
-	flagIncludeDev = fs.Bool("dev", false, "Include devDependencies. Warning: this will take a long time to bundle!")
-	flagUseIndent = fs.Bool("indent", false, "Print with indent to see package hierarchy")
-	flagOffline = fs.Bool("offline", false, "Sanitize package.json (remove scripts, repository, etc.) for airgapped environments")
+	fs.StringVar(&flagOutputDir, "output", "./npmpkgs", "Target directory for downloaded tarballs (set to empty to omit building output)")
+	fs.BoolVar(&flagConcurrent, "concurrent", false, "Enable concurrent downloads and dependency traversal")
+	fs.BoolVar(&flagIncludeDev, "dev", false, "Include devDependencies. Warning: this will take a long time to bundle!")
+	fs.BoolVar(&flagUseIndent, "indent", false, "Print with indent to see package hierarchy")
+	fs.BoolVar(&flagOffline, "offline", false, "Sanitize package.json (remove scripts, repository, etc.) for airgapped environments")
+	fs.BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
 
-	err := fs.Parse(os.Args[1:])
-	if err != nil {
-		return errFlagHelp
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "%s %s — Bundle npm packages and their entire dependency tree.\n\n", program, version)
+
+		fmt.Fprintf(fs.Output(), "Usage:\n")
+		fmt.Fprintf(fs.Output(), "  %s [flags] <packages.txt | pkg@version...>\n\n", program)
+
+		fmt.Fprintf(fs.Output(), "Examples:\n")
+		fmt.Fprintf(fs.Output(), "  %s -indent lodash@4.17.21\n", program)
+		fmt.Fprintf(fs.Output(), "  %s -offline ./packages.txt\n\n", program)
+
+		fmt.Fprintf(fs.Output(), "Flags:\n")
+		fs.PrintDefaults()
 	}
+
+	_ = fs.Parse(os.Args[1:])
 
 	args := fs.Args()
 	if len(args) == 0 {
-		return fmt.Errorf("missing file or package argument (e.g. file.txt or pkgname@version)")
+		fs.Usage()
+		os.Exit(2)
 	}
 
 	input := args[0]
@@ -139,7 +167,7 @@ func handleNpmPkg(ctx context.Context, pkgStr string, depth int) error {
 
 	outByte, err := fetchPackageMetadata(ctx, pkgStr)
 	if err != nil {
-		return fmt.Errorf("npm package '%s' not found: %w", pkgStr, err)
+		return err
 	}
 
 	var pkg NpmPackage
@@ -148,39 +176,49 @@ func handleNpmPkg(ctx context.Context, pkgStr string, depth int) error {
 		return fmt.Errorf("failed to parse package '%s' metadata: %w", pkgStr, err)
 	}
 
+	if pkg.Name == "" || pkg.Version == "" {
+		return nil // required fields missing, skip
+	}
+
+	license := pkg.License
+	if license == "" {
+		license = "N/A"
+	}
+
+	nameVer := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
+	meta := fmt.Sprintf("(%s) [%s]", license, formatBytes(pkg.Dist.UnpackedSize))
+
+	if useColor() {
+		nameVer = ansiCyan + nameVer + ansiReset
+		meta = ansiDim + meta + ansiReset
+	}
+
+	printMu.Lock()
+	if depth == 0 {
+		fmt.Printf("processing: %s %s\n", nameVer, meta)
+	} else if flagUseIndent {
+		indent := strings.Repeat("  ", depth)
+		fmt.Printf("%s%s %s\n", indent, nameVer, meta)
+	} else {
+		fmt.Printf("  %s %s\n", nameVer, meta)
+	}
+	printMu.Unlock()
+
 	return handleDeps(ctx, pkg, depth)
 }
 
 // handleDeps outputs the tarball and recursively processes all package dependencies.
 func handleDeps(ctx context.Context, pkg NpmPackage, depth int) error {
-	if pkg.Name == "" || pkg.Version == "" {
-		return nil
-	}
-
-	printMu.Lock()
-	indent := strings.Repeat("  ", depth)
-	if depth == 0 {
-		fmt.Printf("processing: %s@%s\n", pkg.Name, pkg.Version)
-	} else {
-		if *flagUseIndent {
-			fmt.Printf("%s%s@%s\n", indent, pkg.Name, pkg.Version)
-		} else {
-			fmt.Printf("  %s@%s\n", pkg.Name, pkg.Version)
-		}
-	}
-	printMu.Unlock()
-
-	if *flagOutputDir != "" {
+	if flagOutputDir != "" {
 		fileMu.Lock()
 
-		outPath, err := fetchOutputTarball(pkg, *flagOutputDir)
+		outPath, err := fetchOutputTarball(pkg, flagOutputDir)
 		if err != nil {
 			fileMu.Unlock()
 			return fmt.Errorf("failed to generate tarball for %s: %w", pkg.Name+"@"+pkg.Version, err)
 		}
 
-		if *flagOffline {
-
+		if flagOffline {
 			tmpPath := outPath + ".tmp"
 			err = sanitizeTarball(outPath, tmpPath)
 			if err != nil {
@@ -204,20 +242,21 @@ func handleDeps(ctx context.Context, pkg NpmPackage, depth int) error {
 	maps.Copy(allDependencies, pkg.PeerDependencies)
 	maps.Copy(allDependencies, pkg.OptionalDependencies)
 
-	if *flagIncludeDev {
+	if flagIncludeDev {
 		// WARN: this will take a long time to bundle
 		maps.Copy(allDependencies, pkg.DevDependencies)
 	}
 
-	if *flagConcurrent {
+	if flagConcurrent {
 		var wg sync.WaitGroup
 		var errMu sync.Mutex
 		var combinedErr error
 
 		for name, version := range allDependencies {
 			pkgStr := fmt.Sprintf("%s@%s", name, version)
+			sem <- struct{}{}
 			wg.Go(func() {
-				// NOTE: add rate limit?
+				defer func() { <-sem }()
 				err := handleNpmPkg(ctx, pkgStr, depth+1)
 				if err != nil {
 					errMu.Lock()
@@ -314,7 +353,7 @@ func fetchPackageMetadata(ctx context.Context, pkgStr string) ([]byte, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch metadata from registry: %w", err)
+		return nil, fmt.Errorf("failed to fetch %s metadata from registry: %w", pkgStr, err)
 	}
 	defer resp.Body.Close()
 
@@ -324,13 +363,13 @@ func fetchPackageMetadata(ctx context.Context, pkgStr string) ([]byte, error) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, fmt.Errorf("failed to read response body for %s: %w", pkgStr, err)
 	}
 
 	var reg FullRegistryResponse
 	err = json.Unmarshal(body, &reg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse registry json: %w", err)
+		return nil, fmt.Errorf("failed to parse registry json for %s: %w", pkgStr, err)
 	}
 
 	var targetVersion string
@@ -487,4 +526,32 @@ func sanitizeTarball(srcPath, destPath string) error {
 	}
 
 	return nil
+}
+
+// formatBytes formats bytes into human size
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// useColor determine whether to use color
+func useColor() bool {
+	if flagNoColor {
+		return false
+	}
+	if _, exists := os.LookupEnv("NO_COLOR"); exists {
+		return false // user preference
+	}
+	if !term.IsTerminal(int(os.Stderr.Fd())) {
+		return false // not a tty
+	}
+	return true
 }
