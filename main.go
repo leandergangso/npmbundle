@@ -43,7 +43,7 @@ var (
 	flagConcurrent bool
 	flagIncludeDev bool
 	flagUseIndent  bool
-	flagOffline    bool
+	flagSanitize   bool
 	flagNoColor    bool
 )
 
@@ -87,11 +87,11 @@ func main() {
 func run(ctx context.Context) error {
 	fs := flag.NewFlagSet(program, flag.ExitOnError)
 
-	fs.StringVar(&flagOutputDir, "output", "./npmpkgs", "Target directory for downloaded tarballs (set to empty to omit building output)")
-	fs.BoolVar(&flagConcurrent, "concurrent", false, "Enable concurrent downloads and dependency traversal")
+	fs.StringVar(&flagOutputDir, "output", "./npmpkgs", "Target directory for tarballs (set to \"\" for preview mode)")
+	fs.BoolVar(&flagConcurrent, "concurrent", false, "Enable concurrent package downloads")
 	fs.BoolVar(&flagIncludeDev, "dev", false, "Include devDependencies. Warning: this will take a long time to bundle!")
-	fs.BoolVar(&flagUseIndent, "indent", false, "Print with indent to see package hierarchy")
-	fs.BoolVar(&flagOffline, "offline", false, "Sanitize package.json (remove scripts, repository, etc.) for airgapped environments")
+	fs.BoolVar(&flagUseIndent, "indent", false, "Use nested indentation to deosplay package hierarchy")
+	fs.BoolVar(&flagSanitize, "sanitize", false, "Sanitize package.json (removes scripts, repository, etc.)")
 	fs.BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
 
 	fs.Usage = func() {
@@ -218,7 +218,7 @@ func handleDeps(ctx context.Context, pkg NpmPackage, depth int) error {
 			return fmt.Errorf("failed to generate tarball for %s: %w", pkg.Name+"@"+pkg.Version, err)
 		}
 
-		if flagOffline {
+		if flagSanitize {
 			tmpPath := outPath + ".tmp"
 			err = sanitizeTarball(outPath, tmpPath)
 			if err != nil {
