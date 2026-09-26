@@ -98,7 +98,7 @@ func run(ctx context.Context) error {
 		fmt.Fprintf(fs.Output(), "%s %s — Bundle npm packages and their entire dependency tree.\n\n", program, version)
 
 		fmt.Fprintf(fs.Output(), "Usage:\n")
-		fmt.Fprintf(fs.Output(), "  %s [flags] <packages.txt | pkg@version...>\n\n", program)
+		fmt.Fprintf(fs.Output(), "  %s [flags] <packages.txt... | pkg@version...>\n\n", program)
 
 		fmt.Fprintf(fs.Output(), "Examples:\n")
 		fmt.Fprintf(fs.Output(), "  %s -tree lodash@4.17.21\n", program)
@@ -116,21 +116,27 @@ func run(ctx context.Context) error {
 		os.Exit(2)
 	}
 
-	input := args[0]
-	if strings.Contains(input, "@") {
-		return handleNpmPkg(ctx, input, 0)
+	var errs error
+	for _, input := range args {
+		fi, err := os.Stat(input)
+		if err == nil {
+			if fi.IsDir() {
+				errs = errors.Join(errs, fmt.Errorf("argument cannot be a directory: %s", input))
+				continue
+			}
+			err = handleFile(ctx, input)
+			if err != nil {
+				errs = errors.Join(errs, err)
+			}
+		} else {
+			err = handleNpmPkg(ctx, input, 0)
+			if err != nil {
+				errs = errors.Join(errs, err)
+			}
+		}
 	}
 
-	fi, err := os.Stat(input)
-	if err != nil {
-		return handleNpmPkg(ctx, input, 0)
-	}
-
-	if fi.IsDir() {
-		return fmt.Errorf("argument can't be a directory")
-	}
-
-	return handleFile(ctx, input)
+	return errs
 }
 
 // handleFile reads a plain text package list file line by line.
