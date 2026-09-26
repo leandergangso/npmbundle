@@ -23,6 +23,7 @@ import (
 )
 
 var (
+	fileMu   sync.Mutex
 	seenMu   sync.Mutex
 	printMu  sync.Mutex
 	seenPkgs = make(map[string]struct{})
@@ -170,21 +171,32 @@ func handleDeps(ctx context.Context, pkg NpmPackage, depth int) error {
 	printMu.Unlock()
 
 	if *flagOutputDir != "" {
+		fileMu.Lock()
+
 		outPath, err := fetchOutputTarball(pkg, *flagOutputDir)
 		if err != nil {
+			fileMu.Unlock()
 			return fmt.Errorf("failed to generate tarball for %s: %w", pkg.Name+"@"+pkg.Version, err)
 		}
+
 		if *flagOffline {
-			tempPath := outPath + ".tmp"
-			err = sanitizeTarball(outPath, tempPath)
+
+			tmpPath := outPath + ".tmp"
+			err = sanitizeTarball(outPath, tmpPath)
 			if err != nil {
+				os.Remove(tmpPath)
+				fileMu.Unlock()
 				return fmt.Errorf("failed to sanitize tarball '%s' for offline use: %w", outPath, err)
 			}
-			err = os.Rename(tempPath, outPath)
+			err = os.Rename(tmpPath, outPath)
 			if err != nil {
+				os.Remove(tmpPath)
+				fileMu.Unlock()
 				return err
 			}
 		}
+
+		fileMu.Unlock()
 	}
 
 	allDependencies := make(map[string]string)
@@ -237,15 +249,6 @@ func fetchOutputTarball(pkg NpmPackage, outputDir string) (string, error) {
 		return "", fmt.Errorf("tarball URL is empty for: %s@%s", pkg.Name, pkg.Version)
 	}
 
-	cleanName := strings.TrimPrefix(pkg.Name, "@")
-	cleanName = strings.ReplaceAll(cleanName, "/", "-")
-	filename := fmt.Sprintf("%s-%s.tgz", cleanName, pkg.Version)
-	destPath := filepath.Join(outputDir, filename)
-
-	if _, err := os.Stat(destPath); err == nil {
-		return destPath, nil // already fetched
-	}
-
 	err := os.MkdirAll(outputDir, 0755)
 	if err != nil {
 		return "", fmt.Errorf("failed to create output directory: %w", err)
@@ -266,6 +269,11 @@ func fetchOutputTarball(pkg NpmPackage, outputDir string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("received non-200 status code (%s) for %s", resp.Status, secureURL)
 	}
+
+	cleanName := strings.TrimPrefix(pkg.Name, "@")
+	cleanName = strings.ReplaceAll(cleanName, "/", "-")
+	filename := fmt.Sprintf("%s-%s.tgz", cleanName, pkg.Version)
+	destPath := filepath.Join(outputDir, filename)
 
 	out, err := os.Create(destPath)
 	if err != nil {
@@ -444,11 +452,11 @@ func sanitizeTarball(srcPath, destPath string) error {
 				return err
 			}
 
+			//delete(pkg, "bugs")
+			//delete(pkg, "homepage")
 			delete(pkg, "scripts")
-			delete(pkg, "repository")
-			delete(pkg, "bugs")
-			delete(pkg, "homepage")
 			delete(pkg, "funding")
+			delete(pkg, "repository")
 			delete(pkg, "publishConfig")
 
 			newData, err := json.MarshalIndent(pkg, "", "  ")
