@@ -102,7 +102,7 @@ func run(ctx context.Context) error {
 
 		fmt.Fprintf(fs.Output(), "Examples:\n")
 		fmt.Fprintf(fs.Output(), "  %s -indent lodash@4.17.21\n", program)
-		fmt.Fprintf(fs.Output(), "  %s -offline ./packages.txt\n\n", program)
+		fmt.Fprintf(fs.Output(), "  %s -sanitize ./packages.txt\n\n", program)
 
 		fmt.Fprintf(fs.Output(), "Flags:\n")
 		fs.PrintDefaults()
@@ -224,7 +224,7 @@ func handleDeps(ctx context.Context, pkg NpmPackage, depth int) error {
 			if err != nil {
 				os.Remove(tmpPath)
 				fileMu.Unlock()
-				return fmt.Errorf("failed to sanitize tarball '%s' for offline use: %w", outPath, err)
+				return fmt.Errorf("failed to sanitize package.json '%s':  %w", outPath, err)
 			}
 			err = os.Rename(tmpPath, outPath)
 			if err != nil {
