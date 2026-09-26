@@ -37,7 +37,6 @@ var (
 	seenMu   sync.Mutex
 	printMu  sync.Mutex
 	seenPkgs = make(map[string]struct{})
-	sem      = make(chan struct{}, 10)
 
 	flagOutputDir  string
 	flagConcurrent bool
@@ -71,7 +70,7 @@ func main() {
 	ctx := context.Background()
 	err := run(ctx)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
+		fmt.Fprintln(os.Stderr, "\nErrors:\n  -", err)
 		os.Exit(1)
 	}
 
@@ -256,24 +255,22 @@ func handleDeps(ctx context.Context, pkg NpmPackage, depth int) error {
 	if flagConcurrent {
 		var wg sync.WaitGroup
 		var errMu sync.Mutex
-		var combinedErr error
+		var errs error
 
 		for name, version := range allDependencies {
 			pkgStr := fmt.Sprintf("%s@%s", name, version)
-			sem <- struct{}{}
 			wg.Go(func() {
-				defer func() { <-sem }()
 				err := handleNpmPkg(ctx, pkgStr, depth+1)
 				if err != nil {
 					errMu.Lock()
-					combinedErr = errors.Join(combinedErr, err)
+					errs = errors.Join(errs, err)
 					errMu.Unlock()
 				}
 			})
 		}
 
 		wg.Wait()
-		return combinedErr
+		return errs
 	}
 
 	var errs error
