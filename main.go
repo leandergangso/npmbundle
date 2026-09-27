@@ -61,8 +61,6 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	time.Sleep(time.Second)
-
 	if flagOutputDir != "" {
 		logln() // output spacer
 		err = downloadTarballs(ctx, pkgs)
