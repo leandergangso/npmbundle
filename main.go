@@ -116,20 +116,20 @@ func extractPkgsFromArgs(args []string) ([]string, error) {
 }
 
 func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, error) {
+	var mu sync.Mutex
 	var pkgs []*npm.Package
 	visited := make(map[string]struct{})
+	pkgCache := make(map[string]*npm.Package)
 
 	var resolveFn func(pkgSpec string, depth int) error
 	resolveFn = func(pkgSpec string, depth int) error {
 		if _, ok := visited[pkgSpec]; ok {
 			nameVer := pkgSpec
 			meta := "[DUPLICATE]"
-
 			if useColor() {
 				nameVer = ansiCyan + nameVer + ansiReset
 				meta = ansiDim + meta + ansiReset
 			}
-
 			if flagTree {
 				indent := strings.Repeat("  ", depth)
 				logf("%s%s %s\n", indent, meta, nameVer)
@@ -138,13 +138,26 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 			}
 			return nil
 		}
-		visited[pkgSpec] = struct{}{}
+		visited[pkgSpec] = struct{}{} // struct{}{} uses 0 memory, it contains no data
 
-		pkg, err := npm.FetchPackageMetadata(ctx, pkgSpec)
-		if err != nil {
-			logln() // output spacer
-			return err
+		var pkg *npm.Package
+		var err error
+
+		mu.Lock()
+		pkg, ok := pkgCache[pkgSpec]
+		mu.Unlock()
+
+		if !ok {
+			pkg, err = npm.FetchPackageMetadata(ctx, pkgSpec)
+			if err != nil {
+				logln() // output spacer
+				return err
+			}
+			mu.Lock()
+			pkgCache[pkgSpec] = pkg
+			mu.Unlock()
 		}
+
 		pkgs = append(pkgs, pkg)
 
 		nameVer := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
@@ -169,14 +182,43 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 		maps.Copy(allDependencies, pkg.PeerDependencies)
 		maps.Copy(allDependencies, pkg.OptionalDependencies)
 
-		//if flagDev && depth == 0 { // Usually devDependencies are only pulled for the root
-		if flagDev {
-			maps.Copy(allDependencies, pkg.DevDependencies)
+		var wg sync.WaitGroup
+		var errOnce sync.Once
+		var fetchErr error
+
+		for name, constraint := range allDependencies {
+			subSpec := fmt.Sprintf("%s@%s", name, constraint)
+			if _, ok = visited[subSpec]; ok {
+				continue
+			}
+
+			wg.Go(func() {
+				mu.Lock()
+				_, ok := pkgCache[subSpec]
+				mu.Unlock()
+
+				if !ok {
+					childPkg, err := npm.FetchPackageMetadata(ctx, subSpec)
+					if err != nil {
+						errOnce.Do(func() { fetchErr = err })
+						return
+					}
+					mu.Lock()
+					pkgCache[subSpec] = childPkg
+					mu.Unlock()
+				}
+			})
+		}
+
+		wg.Wait()
+
+		if fetchErr != nil {
+			return fetchErr
 		}
 
 		for name, constraint := range allDependencies {
-			spec := fmt.Sprintf("%s@%s", name, constraint)
-			err = resolveFn(spec, depth+1)
+			subSpec := fmt.Sprintf("%s@%s", name, constraint)
+			err = resolveFn(subSpec, depth+1)
 			if err != nil {
 				return err
 			}
@@ -217,23 +259,38 @@ func downloadTarballs(ctx context.Context, pkgs []*npm.Package) error {
 						return
 					}
 
-					wg.Go(func() {
-						err := npm.DownloadTarball(ctx, pkg, flagOutputDir, flagSanitize)
+					size, err := npm.DownloadTarball(ctx, pkg, flagOutputDir, flagSanitize)
 
-						mu.Lock()
-						defer mu.Unlock()
-
-						if err != nil {
-							var out = "- [ERR]"
-							if useColor() {
-								out = "- " + ansiRed + "[ERR]" + ansiReset
-							}
-							logf(out+" failed to download pkg tarball %s@%s: %v\n", pkg.Name, pkg.Version, err)
-							errCount++
-						} else {
-							logf("- downloaded and saved tarball for %s@%s\n", pkg.Name, pkg.Version)
+					mu.Lock()
+					if err != nil {
+						name := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
+						meta := fmt.Sprintf("[ERROR: %v]", err)
+						if useColor() {
+							name = ansiCyan + name + ansiReset
+							meta = ansiRed + meta + ansiReset
 						}
-					})
+						logf("Downloading: %s %s\n", meta, name)
+						errCount++
+
+					} else if size > 0 {
+						name := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
+						meta := fmt.Sprintf("[%s]", npm.FormatSize(size))
+						if useColor() {
+							name = ansiCyan + name + ansiReset
+							meta = ansiDim + meta + ansiReset
+						}
+						logf("Downloading: %s %s\n", name, meta)
+
+					} else {
+						name := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
+						meta := "[LOCAL]"
+						if useColor() {
+							name = ansiCyan + name + ansiReset
+							meta = ansiDim + meta + ansiReset
+						}
+						logf("Downloading: %s %s\n", meta, name)
+					}
+					mu.Unlock()
 				}
 			}
 		})
@@ -261,7 +318,6 @@ var (
 	flagSanitize  bool
 	flagNoColor   bool
 	flagTree      bool
-	flagDev       bool
 )
 
 func parseFlagsAndArgs() []string {
@@ -285,7 +341,6 @@ func parseFlagsAndArgs() []string {
 	fs.BoolVar(&flagSanitize, "sanitize", false, "Sanitize package.json (removes scripts, repository, etc.)")
 	fs.BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
 	fs.BoolVar(&flagTree, "tree", false, "Display package hierarchy as a nested tree")
-	fs.BoolVar(&flagDev, "dev", false, "Include devDependencies. Warning: this will take a long time to bundle!")
 
 	_ = fs.Parse(os.Args[1:])
 

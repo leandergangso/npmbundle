@@ -116,9 +116,9 @@ func FetchPackageMetadata(ctx context.Context, pkgSpec string) (*Package, error)
 
 // DownloadTarball downloads npm pkg tarball, places it in a temp location,
 // sanitizes it if requested, and moves it to the final outputDir.
-func DownloadTarball(ctx context.Context, pkg *Package, outputDir string, sanitize bool) error {
+func DownloadTarball(ctx context.Context, pkg *Package, outputDir string, sanitize bool) (int64, error) {
 	if pkg.Dist.Tarball == "" {
-		return fmt.Errorf("tarball URL is empty for: %s@%s", pkg.Name, pkg.Version)
+		return 0, fmt.Errorf("tarball URL is empty for: %s@%s", pkg.Name, pkg.Version)
 	}
 
 	var cleanName = pkg.Name
@@ -131,32 +131,32 @@ func DownloadTarball(ctx context.Context, pkg *Package, outputDir string, saniti
 
 	_, err := os.Stat(outputFile)
 	if err == nil {
-		return nil // file exists
+		return 0, nil // file exists
 	}
 
 	err = os.MkdirAll(outputDir, 0755)
 	if err != nil {
-		return fmt.Errorf("failed to create output directory %s: %w", outputDir, err)
+		return 0, fmt.Errorf("failed to create output directory %s: %w", outputDir, err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", pkg.Dist.Tarball, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create request for %s: %w", pkg.Dist.Tarball, err)
+		return 0, fmt.Errorf("failed to create request for %s: %w", pkg.Dist.Tarball, err)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to download tarball from %s: %w", pkg.Dist.Tarball, err)
+		return 0, fmt.Errorf("failed to download tarball from %s: %w", pkg.Dist.Tarball, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("received non-200 status code (%s) for %s", resp.Status, pkg.Dist.Tarball)
+		return 0, fmt.Errorf("received non-200 status code (%s) for %s", resp.Status, pkg.Dist.Tarball)
 	}
 
 	file, err := os.Create(outputFile)
 	if err != nil {
-		return fmt.Errorf("failed to create file %s: %w", filename, err)
+		return 0, fmt.Errorf("failed to create file %s: %w", filename, err)
 	}
 
 	var success bool
@@ -170,17 +170,22 @@ func DownloadTarball(ctx context.Context, pkg *Package, outputDir string, saniti
 	if sanitize {
 		err = sanitizeTarball(file, resp.Body)
 		if err != nil {
-			return fmt.Errorf("failed to sanitize tarball: %w", err)
+			return 0, fmt.Errorf("failed to sanitize tarball: %w", err)
 		}
 	} else {
 		_, err = io.Copy(file, resp.Body)
 		if err != nil {
-			return fmt.Errorf("failed to write download data: %w", err)
+			return 0, fmt.Errorf("failed to write download data: %w", err)
 		}
 	}
 
+	stat, err := file.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("failed to stat file %s: %w", filename, err)
+	}
+
 	success = true
-	return nil
+	return stat.Size(), nil
 }
 
 // SanitizeTarball reads tarball body, strips unwanted fields from package.json, and writes to file
