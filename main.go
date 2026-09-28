@@ -56,30 +56,24 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	var pkgCount = 0
-	for _, pkgSpec := range pkgSpecs {
-		pkgs, err := resolvePackages(ctx, pkgSpec)
+	pkgs, err := resolvePackages(ctx, pkgSpecs)
+	if err != nil {
+		return err
+	}
+
+	if flagOutputDir != "" {
+		logln() // output spacer
+		err = downloadTarballs(ctx, pkgs)
 		if err != nil {
 			return err
 		}
-		pkgCount += len(pkgs)
-
-		if flagOutputDir != "" {
-			logln() // output spacer
-			err = downloadTarballs(ctx, pkgs)
-			if err != nil {
-				return err
-			}
-		}
-
-		logln() // output spacer
 	}
 
 	duration := time.Since(now).Seconds()
 	if flagOutputDir == "" {
-		logf("Finished %d packages without bundling in %.2fs\n", pkgCount, duration)
+		logf("\nFinished %d packages without bundling in %.2fs\n", len(pkgs), duration)
 	} else {
-		logf("Successfully bundled %d packages in %.2fs\n", pkgCount, duration)
+		logf("\nSuccessfully bundled %d packages in %.2fs\n", len(pkgs), duration)
 	}
 
 	return nil
@@ -119,7 +113,7 @@ func extractPkgsFromArgs(args []string) ([]string, error) {
 	return pkgSpecs, nil
 }
 
-func resolvePackages(ctx context.Context, pkgSpecs ...string) ([]*npm.Package, error) {
+func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, error) {
 	var mu sync.Mutex
 	var pkgs []*npm.Package
 	var visited = make(map[string]struct{})
@@ -248,7 +242,18 @@ func resolvePackages(ctx context.Context, pkgSpecs ...string) ([]*npm.Package, e
 		}
 	}
 
-	return pkgs, nil
+	// deduplicate packages
+	seen := make(map[string]bool)
+	var uniquePkgs []*npm.Package
+	for _, pkg := range pkgs {
+		key := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
+		if !seen[key] {
+			seen[key] = true
+			uniquePkgs = append(uniquePkgs, pkg)
+		}
+	}
+
+	return uniquePkgs, nil
 }
 
 func downloadTarballs(ctx context.Context, pkgs []*npm.Package) error {
@@ -310,19 +315,8 @@ func downloadTarballs(ctx context.Context, pkgs []*npm.Package) error {
 		})
 	}
 
-	// deduplicate packages
-	seen := make(map[string]bool)
-	var uniquePkgs []*npm.Package
-	for _, pkg := range pkgs {
-		key := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
-		if !seen[key] {
-			seen[key] = true
-			uniquePkgs = append(uniquePkgs, pkg)
-		}
-	}
-
 	// enqueue all packages
-	for _, pkg := range uniquePkgs {
+	for _, pkg := range pkgs {
 		taskC <- pkg
 	}
 	close(taskC)
