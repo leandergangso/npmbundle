@@ -14,8 +14,19 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
+)
+
+var (
+	httpClient = &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
 )
 
 type Package struct {
@@ -48,7 +59,7 @@ type RegistryResponse struct {
 //	example: axios@0.30.0
 //	example: axios@latest
 func FetchPackageMetadata(ctx context.Context, pkgSpec string) (*Package, error) {
-	pkgName, pkgConstraint := ParsePackageName(pkgSpec)
+	pkgName, pkgConstraint := SplitPackageSpec(pkgSpec)
 
 	escapedName := pkgName
 	after, ok := strings.CutPrefix(pkgName, "@")
@@ -63,7 +74,7 @@ func FetchPackageMetadata(ctx context.Context, pkgSpec string) (*Package, error)
 	}
 	req.Header.Set("Accept", "application/vnd.npm.install-v1+json") // get limited metadata for reduced size and bandwidth
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch %s metadata from registry: %w", pkgName, err)
 	}
@@ -144,7 +155,7 @@ func DownloadTarball(ctx context.Context, pkg *Package, outputDir string, saniti
 		return 0, fmt.Errorf("failed to create request for %s: %w", pkg.Dist.Tarball, err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("failed to download tarball from %s: %w", pkg.Dist.Tarball, err)
 	}
@@ -270,6 +281,17 @@ func sanitizeTarball(file *os.File, body io.ReadCloser) error {
 	return nil
 }
 
+// ResolveSpec takes pkg name and constraint(version) and resolves it into its proper pkg spec
+func ResolveSpec(name, constraint string) string {
+	var spec string
+	if after, ok := strings.CutPrefix(constraint, "npm:"); ok {
+		spec = after
+	} else {
+		spec = fmt.Sprintf("%s@%s", name, constraint)
+	}
+	return spec
+}
+
 // ResolveConstraint takes the tag constraint and a list of all available tags and returns the highest allowed tag
 func ResolveConstraint(tagConstraint string, availableVersions []string) (string, error) {
 	var targetV string
@@ -299,18 +321,18 @@ func ResolveConstraint(tagConstraint string, availableVersions []string) (string
 	return targetV, nil
 }
 
-// ParsePackageName take a pkg string and splits it into its name and version
-func ParsePackageName(pkg string) (string, string) {
-	if strings.HasPrefix(pkg, "@") {
-		idx := strings.Index(pkg[1:], "@")
+// SplitPackageSpec take a pkg string and splits it into its name and version
+func SplitPackageSpec(spec string) (string, string) {
+	if strings.HasPrefix(spec, "@") {
+		idx := strings.Index(spec[1:], "@")
 		if idx == -1 {
-			return pkg, "latest"
+			return spec, "latest"
 		}
 		actualIdx := idx + 1
-		return pkg[:actualIdx], pkg[actualIdx+1:]
+		return spec[:actualIdx], spec[actualIdx+1:]
 	}
 
-	parts := strings.SplitN(pkg, "@", 2)
+	parts := strings.SplitN(spec, "@", 2)
 	if len(parts) == 1 || parts[1] == "" {
 		return parts[0], "latest"
 	}

@@ -1,4 +1,4 @@
-#@tanstack/router-plugin@latest
+@tanstack/router-plugin@latest
 #ms@latest
 axios@latest
 #axios@0.1.0

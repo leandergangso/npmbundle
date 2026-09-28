@@ -192,7 +192,7 @@ func resolvePackages(ctx context.Context, pkgSpecs ...string) ([]*npm.Package, e
 		var fetchErr error
 
 		for name, constraint := range allDependencies {
-			subSpec := fmt.Sprintf("%s@%s", name, constraint)
+			subSpec := npm.ResolveSpec(name, constraint)
 			if _, ok = visited[subSpec]; ok {
 				continue
 			}
@@ -218,11 +218,11 @@ func resolvePackages(ctx context.Context, pkgSpecs ...string) ([]*npm.Package, e
 		wg.Wait()
 
 		if fetchErr != nil {
-			return fetchErr
+			return fmt.Errorf("failed to fetch pkg %s: %w", pkgSpec, fetchErr)
 		}
 
 		for name, constraint := range allDependencies {
-			subSpec := fmt.Sprintf("%s@%s", name, constraint)
+			subSpec := npm.ResolveSpec(name, constraint)
 			err = resolveRecursive(subSpec, depth+1)
 			if err != nil {
 				return err
