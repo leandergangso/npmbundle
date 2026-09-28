@@ -187,6 +187,15 @@ func resolvePackages(ctx context.Context, pkgSpecs ...string) ([]*npm.Package, e
 		maps.Copy(allDependencies, pkg.PeerDependencies)
 		maps.Copy(allDependencies, pkg.OptionalDependencies)
 
+		if flagNoDeps {
+			meta := fmt.Sprintf("[NO-DEPS] ignored %d direct dependencies", len(allDependencies))
+			if useColor() {
+				meta = ansiDim + meta + ansiReset
+			}
+			logf(" %s\n", meta)
+			return nil
+		}
+
 		var wg sync.WaitGroup
 		var errOnce sync.Once
 		var fetchErr error
@@ -279,7 +288,7 @@ func downloadTarballs(ctx context.Context, pkgs []*npm.Package) error {
 
 					} else if size > 0 {
 						name := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
-						meta := fmt.Sprintf("[%s]", npm.FormatSize(size))
+						meta := fmt.Sprintf("| %s", npm.FormatSize(size))
 						if useColor() {
 							name = ansiCyan + name + ansiReset
 							meta = ansiDim + meta + ansiReset
@@ -333,6 +342,7 @@ var (
 	flagOutputDir string
 	flagSanitize  bool
 	flagNoColor   bool
+	flagNoDeps    bool
 	flagTree      bool
 )
 
@@ -353,9 +363,10 @@ func parseFlagsAndArgs() []string {
 		fs.PrintDefaults()
 	}
 
-	fs.StringVar(&flagOutputDir, "output", "./npmpkgs", "Target directory for tarballs (set to \"\" for preview mode)")
+	fs.StringVar(&flagOutputDir, "output", "./npmpkgs", "Target directory for bundled packages, use \"\" to skip bundling")
 	fs.BoolVar(&flagSanitize, "sanitize", false, "Sanitize package.json (removes scripts, repository, etc.)")
 	fs.BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
+	fs.BoolVar(&flagNoDeps, "no-deps", false, "Skip bundling dependencies")
 	fs.BoolVar(&flagTree, "tree", false, "Display package hierarchy as a nested tree")
 
 	_ = fs.Parse(os.Args[1:])
