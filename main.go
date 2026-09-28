@@ -56,24 +56,30 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	pkgs, err := resolvePackages(ctx, pkgSpecs)
-	if err != nil {
-		return err
-	}
-
-	if flagOutputDir != "" {
-		logln() // output spacer
-		err = downloadTarballs(ctx, pkgs)
+	var pkgCount = 0
+	for _, pkgSpec := range pkgSpecs {
+		pkgs, err := resolvePackages(ctx, pkgSpec)
 		if err != nil {
 			return err
 		}
+		pkgCount += len(pkgs)
+
+		if flagOutputDir != "" {
+			logln() // output spacer
+			err = downloadTarballs(ctx, pkgs)
+			if err != nil {
+				return err
+			}
+		}
+
+		logln() // output spacer
 	}
 
 	duration := time.Since(now).Seconds()
 	if flagOutputDir == "" {
-		logf("\nFinished preview in %.2fs\n", duration)
+		logf("Finished %d packages without bundling in %.2fs\n", pkgCount, duration)
 	} else {
-		logf("\nSuccessfully bundled %d packages in %.2fs\n", len(pkgs), duration)
+		logf("Successfully bundled %d packages in %.2fs\n", pkgCount, duration)
 	}
 
 	return nil
@@ -113,26 +119,26 @@ func extractPkgsFromArgs(args []string) ([]string, error) {
 	return pkgSpecs, nil
 }
 
-func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, error) {
+func resolvePackages(ctx context.Context, pkgSpecs ...string) ([]*npm.Package, error) {
 	var mu sync.Mutex
 	var pkgs []*npm.Package
-	visited := make(map[string]struct{})
-	pkgCache := make(map[string]*npm.Package)
+	var visited = make(map[string]struct{})
+	var pkgCache = make(map[string]*npm.Package)
 
-	var resolveFn func(pkgSpec string, depth int) error
-	resolveFn = func(pkgSpec string, depth int) error {
+	var resolveRecursive func(pkgSpec string, depth int) error
+	resolveRecursive = func(pkgSpec string, depth int) error {
 		if _, ok := visited[pkgSpec]; ok {
-			nameVer := pkgSpec
+			name := pkgSpec
 			meta := "[DUPLICATE]"
 			if useColor() {
-				nameVer = ansiCyan + nameVer + ansiReset
+				name = ansiCyan + name + ansiReset
 				meta = ansiDim + meta + ansiReset
 			}
 			if flagTree {
 				indent := strings.Repeat("  ", depth)
-				logf("%s%s %s\n", indent, meta, nameVer)
+				logf("%s%s %s\n", indent, meta, name)
 			} else {
-				logf("  %s %s\n", meta, nameVer)
+				logf("  %s %s\n", meta, name)
 			}
 			return nil
 		}
@@ -140,9 +146,10 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 
 		var pkg *npm.Package
 		var err error
+		var ok bool
 
 		mu.Lock()
-		pkg, ok := pkgCache[pkgSpec]
+		pkg, ok = pkgCache[pkgSpec]
 		mu.Unlock()
 
 		if !ok {
@@ -158,21 +165,21 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 
 		pkgs = append(pkgs, pkg)
 
-		nameVer := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
-		meta := fmt.Sprintf("[%s - %d files]", npm.FormatSize(pkg.Dist.UnpackedSize), pkg.Dist.FileCount)
+		name := fmt.Sprintf("%s -> %s", pkgSpec, pkg.Version)
+		meta := fmt.Sprintf("| %s • %d files", npm.FormatSize(pkg.Dist.UnpackedSize), pkg.Dist.FileCount)
 
 		if useColor() {
-			nameVer = ansiCyan + nameVer + ansiReset
+			name = ansiCyan + name + ansiReset
 			meta = ansiDim + meta + ansiReset
 		}
 
 		if depth == 0 {
-			logf("Resolving: %s %s\n", nameVer, meta)
+			logf("Resolving: %s %s\n", name, meta)
 		} else if flagTree {
 			indent := strings.Repeat("  ", depth)
-			logf("%s%s %s\n", indent, nameVer, meta)
+			logf("%s%s %s\n", indent, name, meta)
 		} else {
-			logf("  %s %s\n", nameVer, meta)
+			logf("  %s %s\n", name, meta)
 		}
 
 		allDependencies := make(map[string]string)
@@ -196,13 +203,13 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 				mu.Unlock()
 
 				if !ok {
-					childPkg, err := npm.FetchPackageMetadata(ctx, subSpec)
+					subPkg, err := npm.FetchPackageMetadata(ctx, subSpec)
 					if err != nil {
 						errOnce.Do(func() { fetchErr = err })
 						return
 					}
 					mu.Lock()
-					pkgCache[subSpec] = childPkg
+					pkgCache[subSpec] = subPkg
 					mu.Unlock()
 				}
 			})
@@ -216,7 +223,7 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 
 		for name, constraint := range allDependencies {
 			subSpec := fmt.Sprintf("%s@%s", name, constraint)
-			err = resolveFn(subSpec, depth+1)
+			err = resolveRecursive(subSpec, depth+1)
 			if err != nil {
 				return err
 			}
@@ -226,7 +233,7 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 	}
 
 	for _, spec := range pkgSpecs {
-		err := resolveFn(spec, 0)
+		err := resolveRecursive(spec, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -239,7 +246,7 @@ func downloadTarballs(ctx context.Context, pkgs []*npm.Package) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var taskC = make(chan *npm.Package, len(pkgs))
+	var taskC = make(chan *npm.Package, 120)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var errCount int
@@ -294,8 +301,19 @@ func downloadTarballs(ctx context.Context, pkgs []*npm.Package) error {
 		})
 	}
 
-	// enqueue all packages
+	// deduplicate packages
+	seen := make(map[string]bool)
+	var uniquePkgs []*npm.Package
 	for _, pkg := range pkgs {
+		key := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
+		if !seen[key] {
+			seen[key] = true
+			uniquePkgs = append(uniquePkgs, pkg)
+		}
+	}
+
+	// enqueue all packages
+	for _, pkg := range uniquePkgs {
 		taskC <- pkg
 	}
 	close(taskC)
