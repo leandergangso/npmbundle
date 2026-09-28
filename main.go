@@ -180,6 +180,9 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 		maps.Copy(allDependencies, pkg.Dependencies)
 		maps.Copy(allDependencies, pkg.PeerDependencies)
 		maps.Copy(allDependencies, pkg.OptionalDependencies)
+		if depth == 0 {
+			maps.Copy(allDependencies, pkg.DevDependencies)
+		}
 
 		if flagNoDeps {
 			meta := fmt.Sprintf("[NO-DEPS] ignored %d direct dependencies", len(allDependencies))
