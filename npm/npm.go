@@ -106,7 +106,7 @@ func FetchPackageMetadata(ctx context.Context, pkgSpec string) (*Package, error)
 		}
 		maxVer, err := ResolveConstraint(pkgConstraint, versions)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to resolve version for pkg %s: %w", pkgSpec, err)
 		}
 		targetVer = maxVer
 	}
