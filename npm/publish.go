@@ -23,7 +23,7 @@ type PackageJSON struct {
 	Description string `json:"description,omitempty"`
 }
 
-func PublishTgzToRegistry(ctx context.Context, tarballPath, registryURL, authToken string) error {
+func PublishPackage(ctx context.Context, tarballPath, registryURL, authToken string) error {
 	// 1. Read the tarball from disk
 	tarballBytes, err := os.ReadFile(tarballPath)
 	if err != nil {
