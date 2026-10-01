@@ -458,7 +458,7 @@ func parseFlagsAndArgs() (flags, []string) {
 	}
 
 	var flags flags
-	fs.StringVar(&flags.Output, "output", "npmpkgs.tgz", "Output tarball path (use \"\" to skip bundling")
+	fs.StringVar(&flags.Output, "output", "npmbundle.tgz", "Output tarball path (use \"\" to skip bundling")
 	fs.BoolVar(&flags.Sanitize, "sanitize", false, "Sanitize package.json (removes scripts, repository, etc.)")
 	fs.BoolVar(&flags.NoDeps, "no-deps", false, "Skip bundling dependencies")
 	fs.BoolVar(&flags.Tree, "tree", false, "Display package hierarchy as a nested tree")
