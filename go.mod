@@ -1,4 +1,4 @@
-module npmpack
+module github.com/leandergangso/npmbundle
 
 go 1.26.7
 

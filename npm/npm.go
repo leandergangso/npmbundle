@@ -126,7 +126,7 @@ func FetchPackageMetadata(ctx context.Context, pkgSpec string) (*Package, error)
 }
 
 // DownloadTarball downloads npm pkg tarball, places it in a temp location,
-// sanitizes it if requested, and moves it to the final outputDir.
+// sanitizes it if requested, and moves it to the output dir.
 func DownloadTarball(ctx context.Context, pkg *Package, outputDir string, sanitize bool) (int64, error) {
 	if pkg.Dist.Tarball == "" {
 		return 0, fmt.Errorf("tarball URL is empty for: %s@%s", pkg.Name, pkg.Version)
@@ -174,7 +174,7 @@ func DownloadTarball(ctx context.Context, pkg *Package, outputDir string, saniti
 	defer func() {
 		file.Close()
 		if !success {
-			_ = os.Remove(outputFile) // cleans up partial files
+			_ = os.Remove(outputFile) // clean up partial files
 		}
 	}()
 
@@ -292,6 +292,25 @@ func ResolveSpec(name, constraint string) string {
 	return spec
 }
 
+// SplitPackageSpec take a pkg string and splits it into its name and version
+func SplitPackageSpec(spec string) (string, string) {
+	if strings.HasPrefix(spec, "@") {
+		idx := strings.Index(spec[1:], "@")
+		if idx == -1 {
+			return spec, "latest"
+		}
+		actualIdx := idx + 1
+		return spec[:actualIdx], spec[actualIdx+1:]
+	}
+
+	parts := strings.SplitN(spec, "@", 2)
+	if len(parts) == 1 || parts[1] == "" {
+		return parts[0], "latest"
+	}
+
+	return parts[0], parts[1]
+}
+
 // ResolveConstraint takes the tag constraint and a list of all available tags and returns the highest allowed tag
 func ResolveConstraint(tagConstraint string, availableVersions []string) (string, error) {
 	var targetV string
@@ -319,25 +338,6 @@ func ResolveConstraint(tagConstraint string, availableVersions []string) (string
 	targetV = maxV.Original()
 
 	return targetV, nil
-}
-
-// SplitPackageSpec take a pkg string and splits it into its name and version
-func SplitPackageSpec(spec string) (string, string) {
-	if strings.HasPrefix(spec, "@") {
-		idx := strings.Index(spec[1:], "@")
-		if idx == -1 {
-			return spec, "latest"
-		}
-		actualIdx := idx + 1
-		return spec[:actualIdx], spec[actualIdx+1:]
-	}
-
-	parts := strings.SplitN(spec, "@", 2)
-	if len(parts) == 1 || parts[1] == "" {
-		return parts[0], "latest"
-	}
-
-	return parts[0], parts[1]
 }
 
 // FormatSize takes a byte size and returns human formatted string

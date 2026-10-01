@@ -1,20 +1,31 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"embed"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"maps"
-	"npmpack/npm"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/leandergangso/npmbundle/npm"
 	"golang.org/x/term"
 )
+
+//go:embed publish.sh
+var scriptFS embed.FS
 
 const (
 	ansiReset  = "\033[0m"
@@ -26,8 +37,8 @@ const (
 )
 
 var (
-	program string = "npmpack" // match go.mod module
-	version string = "dev"     // -X main.version="1.0.0"
+	program string = "npmbundle" // match go.mod module/repo name
+	version string = "dev"       // -X main.version="1.0.0"
 )
 
 func main() {
@@ -38,7 +49,7 @@ func main() {
 		if useColor() {
 			out = ansiRed + "Error:" + ansiReset
 		}
-		logln(out, err)
+		logln(out, err.Error())
 		os.Exit(1)
 	}
 }
@@ -49,28 +60,28 @@ func run(ctx context.Context) error {
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	args := parseFlagsAndArgs()
+	flags, args := parseFlagsAndArgs()
 
 	pkgSpecs, err := extractPkgsFromArgs(args)
 	if err != nil {
 		return err
 	}
 
-	pkgs, err := resolvePackages(ctx, pkgSpecs)
+	pkgs, err := resolvePackages(ctx, pkgSpecs, flags.Tree, flags.NoDeps)
 	if err != nil {
 		return err
 	}
 
-	if flagOutputDir != "" {
+	if flags.Output != "" {
 		logln() // output spacer
-		err = downloadTarballs(ctx, pkgs)
+		err = createBundle(ctx, pkgs, flags.Output, flags.Sanitize)
 		if err != nil {
 			return err
 		}
 	}
 
 	duration := time.Since(now).Seconds()
-	if flagOutputDir == "" {
+	if flags.Output == "" {
 		logf("\nFinished %d packages without bundling in %.2fs\n", len(pkgs), duration)
 	} else {
 		logf("\nSuccessfully bundled %d packages in %.2fs\n", len(pkgs), duration)
@@ -113,11 +124,9 @@ func extractPkgsFromArgs(args []string) ([]string, error) {
 	return pkgSpecs, nil
 }
 
-func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, error) {
-	var mu sync.Mutex
-	var pkgs []*npm.Package
+func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noDeps bool) ([]*npm.Package, error) {
+	var pkgCache sync.Map
 	var visited = make(map[string]struct{})
-	var pkgCache = make(map[string]*npm.Package)
 
 	var resolveRecursive func(pkgSpec string, depth int) error
 	resolveRecursive = func(pkgSpec string, depth int) error {
@@ -128,7 +137,7 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 				name = ansiCyan + name + ansiReset
 				meta = ansiDim + meta + ansiReset
 			}
-			if flagTree {
+			if printTree {
 				indent := strings.Repeat("  ", depth)
 				logf("%s%s %s\n", indent, meta, name)
 			} else {
@@ -142,22 +151,20 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 		var err error
 		var ok bool
 
-		mu.Lock()
-		pkg, ok = pkgCache[pkgSpec]
-		mu.Unlock()
-
-		if !ok {
+		val, ok := pkgCache.Load(pkgSpec)
+		if ok {
+			pkg, ok = val.(*npm.Package)
+			if !ok {
+				panic("map should always be of type *npm.Package")
+			}
+		} else {
 			pkg, err = npm.FetchPackageMetadata(ctx, pkgSpec)
 			if err != nil {
 				logln() // output spacer
 				return err
 			}
-			mu.Lock()
-			pkgCache[pkgSpec] = pkg
-			mu.Unlock()
+			pkgCache.Store(pkgSpec, pkg)
 		}
-
-		pkgs = append(pkgs, pkg)
 
 		name := fmt.Sprintf("%s -> %s", pkgSpec, pkg.Version)
 		meta := fmt.Sprintf("| %s • %d files", npm.FormatSize(pkg.Dist.UnpackedSize), pkg.Dist.FileCount)
@@ -169,7 +176,7 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 
 		if depth == 0 {
 			logf("Resolving: %s %s\n", name, meta)
-		} else if flagTree {
+		} else if printTree {
 			indent := strings.Repeat("  ", depth)
 			logf("%s%s %s\n", indent, name, meta)
 		} else {
@@ -181,7 +188,7 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 		maps.Copy(allDependencies, pkg.PeerDependencies)
 		maps.Copy(allDependencies, pkg.OptionalDependencies)
 
-		if flagNoDeps {
+		if noDeps {
 			meta := fmt.Sprintf("[NO-DEPS] ignored %d direct dependencies", len(allDependencies))
 			if useColor() {
 				meta = ansiDim + meta + ansiReset
@@ -194,28 +201,24 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 		var errOnce sync.Once
 		var fetchErr error
 
+		// pre-fetch dependency data concurrently
 		for name, constraint := range allDependencies {
 			subSpec := npm.ResolveSpec(name, constraint)
 			if _, ok = visited[subSpec]; ok {
 				continue
 			}
 
-			wg.Go(func() {
-				mu.Lock()
-				_, ok := pkgCache[subSpec]
-				mu.Unlock()
-
-				if !ok {
+			_, ok := pkgCache.Load(subSpec)
+			if !ok {
+				wg.Go(func() {
 					subPkg, err := npm.FetchPackageMetadata(ctx, subSpec)
 					if err != nil {
 						errOnce.Do(func() { fetchErr = err })
 						return
 					}
-					mu.Lock()
-					pkgCache[subSpec] = subPkg
-					mu.Unlock()
-				}
-			})
+					pkgCache.Store(subSpec, subPkg)
+				})
+			}
 		}
 
 		wg.Wait()
@@ -224,6 +227,7 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 			return fmt.Errorf("failed to fetch pkg: %w", fetchErr)
 		}
 
+		// resolve dependencies recursively
 		for name, constraint := range allDependencies {
 			subSpec := npm.ResolveSpec(name, constraint)
 			err = resolveRecursive(subSpec, depth+1)
@@ -235,6 +239,7 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 		return nil
 	}
 
+	// initiate recursive dependency lookup
 	for _, spec := range pkgSpecs {
 		err := resolveRecursive(spec, 0)
 		if err != nil {
@@ -242,23 +247,39 @@ func resolvePackages(ctx context.Context, pkgSpecs []string) ([]*npm.Package, er
 		}
 	}
 
-	// deduplicate packages
-	seen := make(map[string]bool)
-	var uniquePkgs []*npm.Package
-	for _, pkg := range pkgs {
-		key := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
-		if !seen[key] {
-			seen[key] = true
-			uniquePkgs = append(uniquePkgs, pkg)
+	// generate complete pkg list
+	var pkgs []*npm.Package
+	pkgCache.Range(func(key, value any) bool {
+		pkg, ok := value.(*npm.Package)
+		if !ok {
+			panic("map should always be of type *npm.Package")
 		}
-	}
+		pkgs = append(pkgs, pkg)
+		return true
+	})
 
-	return uniquePkgs, nil
+	return pkgs, nil
 }
 
-func downloadTarballs(ctx context.Context, pkgs []*npm.Package) error {
+func createBundle(ctx context.Context, pkgs []*npm.Package, output string, sanitize bool) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// sort pkgs for deterministic behavior
+	slices.SortFunc(pkgs, func(a, b *npm.Package) int {
+		aName := fmt.Sprintf("%s@%s", a.Name, a.Version)
+		bName := fmt.Sprintf("%s@%s", b.Name, b.Version)
+		return strings.Compare(aName, bName)
+	})
+
+	// create digest from pkgs
+	h := sha256.New()
+	for _, pkg := range pkgs {
+		fmt.Fprintf(h, "%s@%s\n", pkg.Name, pkg.Version)
+	}
+	digest := hex.EncodeToString(h.Sum(nil)[:12])
+
+	tmpDir := filepath.Join(os.TempDir(), program+"-"+digest)
 
 	var taskC = make(chan *npm.Package, 120)
 	var wg sync.WaitGroup
@@ -273,12 +294,13 @@ func downloadTarballs(ctx context.Context, pkgs []*npm.Package) error {
 				select {
 				case <-ctx.Done():
 					return
+
 				case pkg, ok := <-taskC:
 					if !ok {
 						return
 					}
 
-					size, err := npm.DownloadTarball(ctx, pkg, flagOutputDir, flagSanitize)
+					size, err := npm.DownloadTarball(ctx, pkg, tmpDir, sanitize)
 
 					mu.Lock()
 					if err != nil {
@@ -321,26 +343,104 @@ func downloadTarballs(ctx context.Context, pkgs []*npm.Package) error {
 	}
 	close(taskC)
 
-	wg.Wait() // wait for worker to complete
+	wg.Wait() // wait for worker(s) to complete
+
+	// include script in output
+	b, err := scriptFS.ReadFile("publish.sh")
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(tmpDir, "publish.sh")
+	err = os.WriteFile(path, b, 0755)
+	if err != nil {
+		return err
+	}
+
+	err = archiveDir(tmpDir, output)
+	if err != nil {
+		return err
+	}
 
 	if errCount > 0 {
 		logln() // output spacer
 		return fmt.Errorf("completed with %d failure(s)", errCount)
 	}
 
+	_ = os.RemoveAll(tmpDir)
 	return nil
 }
 
-// flags
-var (
-	flagOutputDir string
-	flagSanitize  bool
-	flagNoColor   bool
-	flagNoDeps    bool
-	flagTree      bool
-)
+func archiveDir(inputDir, outputFile string) error {
+	out, err := os.Create(outputFile)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
 
-func parseFlagsAndArgs() []string {
+	gz := gzip.NewWriter(out)
+	defer gz.Close()
+
+	tw := tar.NewWriter(gz)
+	defer tw.Close()
+
+	base := filepath.Base(inputDir)
+
+	entries, err := os.ReadDir(inputDir)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		path := filepath.Join(inputDir, entry.Name())
+
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+
+		header.Name = filepath.ToSlash(filepath.Join(base, entry.Name()))
+
+		err = tw.WriteHeader(header)
+		if err != nil {
+			return err
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+
+		_, err = io.Copy(tw, f)
+		if err != nil {
+			f.Close()
+			return err
+		}
+
+		f.Close()
+	}
+
+	return nil
+}
+
+var noColor bool
+
+type flags struct {
+	Output   string
+	Sanitize bool
+	NoDeps   bool
+	Tree     bool
+}
+
+func parseFlagsAndArgs() (flags, []string) {
 	fs := flag.NewFlagSet(program, flag.ExitOnError)
 
 	fs.Usage = func() {
@@ -357,11 +457,12 @@ func parseFlagsAndArgs() []string {
 		fs.PrintDefaults()
 	}
 
-	fs.StringVar(&flagOutputDir, "output", "./npmpkgs", "Target directory for bundled packages, use \"\" to skip bundling")
-	fs.BoolVar(&flagSanitize, "sanitize", false, "Sanitize package.json (removes scripts, repository, etc.)")
-	fs.BoolVar(&flagNoColor, "no-color", false, "Disable colored output")
-	fs.BoolVar(&flagNoDeps, "no-deps", false, "Skip bundling dependencies")
-	fs.BoolVar(&flagTree, "tree", false, "Display package hierarchy as a nested tree")
+	var flags flags
+	fs.StringVar(&flags.Output, "output", "npmpkgs.tgz", "Output tarball path (use \"\" to skip bundling")
+	fs.BoolVar(&flags.Sanitize, "sanitize", false, "Sanitize package.json (removes scripts, repository, etc.)")
+	fs.BoolVar(&flags.NoDeps, "no-deps", false, "Skip bundling dependencies")
+	fs.BoolVar(&flags.Tree, "tree", false, "Display package hierarchy as a nested tree")
+	fs.BoolVar(&noColor, "no-color", false, "Disable colored output")
 
 	_ = fs.Parse(os.Args[1:])
 
@@ -375,11 +476,11 @@ func parseFlagsAndArgs() []string {
 		os.Exit(1)
 	}
 
-	return args
+	return flags, args
 }
 
 func useColor() bool {
-	if flagNoColor {
+	if noColor {
 		return false
 	}
 	if _, exists := os.LookupEnv("NO_COLOR"); exists {

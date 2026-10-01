@@ -1,2 +1,9 @@
-npmpack
 npmpkgs/
+
+npmpack
+
+*.txt
+
+*.tgz
+*.tar
+*.tar.gz

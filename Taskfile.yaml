@@ -1,0 +1,14 @@
+version: "3"
+
+tasks:
+  default:
+    desc: Show help
+    silent: true
+    cmds:
+      - task -l
+
+  release:
+    cmds:
+      - echo "Remembered to create new tag?" && sleep 3
+      - command -v goreleaser >/dev/null || go install github.com/goreleaser/goreleaser/v2@latest
+      - goreleaser release --clean
