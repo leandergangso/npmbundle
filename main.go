@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -82,7 +83,7 @@ func run(ctx context.Context) error {
 
 	duration := time.Since(now).Seconds()
 	if flags.Output == "" {
-		logf("\nFinished %d packages without bundling in %.2fs\n", len(pkgs), duration)
+		logf("\nResolved %d packages without bundling in %.2fs\n", len(pkgs), duration)
 	} else {
 		logf("\nSuccessfully bundled %d packages in %.2fs\n", len(pkgs), duration)
 	}
@@ -129,6 +130,10 @@ func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noD
 	var pkgCache sync.Map
 	var visitedResolved = make(map[string]struct{})
 
+	var doneCount int
+	total := len(pkgSpecs)
+	width := len(strconv.Itoa(total))
+
 	var resolveDependencies func(pkgSpec string, depth int) error
 	resolveDependencies = func(pkgSpec string, depth int) error {
 		var pkg *npm.Package
@@ -151,6 +156,19 @@ func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noD
 
 		resolvedSpec := pkg.Name + "@" + pkg.Version
 		if _, ok := visitedResolved[resolvedSpec]; ok {
+			if depth == 0 {
+				doneCount++
+				name := fmt.Sprintf("%s -> %s", pkgSpec, pkg.Version)
+				meta := "[DUPLICATE]"
+				countMeta := fmt.Sprintf("[%*d/%d]", width, doneCount, total)
+				if useColor() {
+					name = ansiCyan + name + ansiReset
+					meta = ansiDim + meta + ansiReset
+					countMeta = ansiDim + countMeta + ansiReset
+				}
+				logf("%s Resolving: %s %s\n", countMeta, meta, name)
+				return nil
+			}
 			name := fmt.Sprintf("%s -> %s", pkgSpec, pkg.Version)
 			meta := "[DUPLICATE]"
 			if useColor() {
@@ -177,7 +195,12 @@ func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noD
 		}
 
 		if depth == 0 {
-			logf("Resolving: %s %s\n", name, meta)
+			doneCount++
+			countMeta := fmt.Sprintf("[%*d/%d]", width, doneCount, total)
+			if useColor() {
+				countMeta = ansiDim + countMeta + ansiReset
+			}
+			logf("%s Resolving: %s %s\n", countMeta, name, meta)
 		} else if printTree {
 			indent := strings.Repeat("  ", depth)
 			logf("%s%s %s\n", indent, name, meta)
@@ -272,13 +295,17 @@ func createBundle(ctx context.Context, pkgs []*npm.Package, output string, sanit
 		return fmt.Errorf("failed to create output directory %s: %w", tmpDir, err)
 	}
 
-	var taskC = make(chan *npm.Package, 120)
+	var taskC = make(chan *npm.Package, 64)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var errCount int
+	var doneCount int
+
+	total := len(pkgs)
+	width := len(strconv.Itoa(total))
 
 	// worker pool
-	const maxWorkers = 12
+	const maxWorkers = 16
 	for range maxWorkers {
 		wg.Go(func() {
 			for {
@@ -294,6 +321,12 @@ func createBundle(ctx context.Context, pkgs []*npm.Package, output string, sanit
 					size, err := npm.DownloadTarball(ctx, pkg, tmpDir, sanitize)
 
 					mu.Lock()
+					doneCount++
+					countMeta := fmt.Sprintf("[%*d/%d]", width, doneCount, total)
+					if useColor() {
+						countMeta = ansiDim + countMeta + ansiReset
+					}
+
 					if err != nil {
 						name := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
 						meta := fmt.Sprintf("[ERROR: %v]", err)
@@ -301,7 +334,7 @@ func createBundle(ctx context.Context, pkgs []*npm.Package, output string, sanit
 							name = ansiCyan + name + ansiReset
 							meta = ansiRed + meta + ansiReset
 						}
-						logf("Downloading: %s %s\n", meta, name)
+						logf("%s Downloading: %s %s\n", countMeta, meta, name)
 						errCount++
 
 					} else if size > 0 {
@@ -311,7 +344,7 @@ func createBundle(ctx context.Context, pkgs []*npm.Package, output string, sanit
 							name = ansiCyan + name + ansiReset
 							meta = ansiDim + meta + ansiReset
 						}
-						logf("Downloading: %s %s\n", name, meta)
+						logf("%s Downloading: %s %s\n", countMeta, name, meta)
 
 					} else {
 						name := fmt.Sprintf("%s@%s", pkg.Name, pkg.Version)
@@ -320,8 +353,9 @@ func createBundle(ctx context.Context, pkgs []*npm.Package, output string, sanit
 							name = ansiCyan + name + ansiReset
 							meta = ansiDim + meta + ansiReset
 						}
-						logf("Downloading: %s %s\n", meta, name)
+						logf("%s Downloading: %s %s\n", countMeta, meta, name)
 					}
+
 					mu.Unlock()
 				}
 			}
@@ -348,6 +382,7 @@ func createBundle(ctx context.Context, pkgs []*npm.Package, output string, sanit
 		return err
 	}
 
+	logf("\nBuilding %s archive...\n", output)
 	err = archiveDir(tmpDir, output)
 	if err != nil {
 		return err

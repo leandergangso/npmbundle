@@ -1,9 +1,0 @@
-@tanstack/router-plugin@latest
-#ms@latest
-axios@latest
-#axios@0.1.0
-#@babel/core@7.24.0
-#express@4.19.2
-#lodash@4.17.21
-#chalk@5.3.0
-typescript
