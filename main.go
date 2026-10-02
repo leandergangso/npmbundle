@@ -5,7 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
-	"embed"
+	_ "embed"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -25,7 +25,7 @@ import (
 )
 
 //go:embed publish.sh
-var scriptFS embed.FS
+var publishScript []byte
 
 const (
 	ansiReset  = "\033[0m"
@@ -125,13 +125,33 @@ func extractPkgsFromArgs(args []string) ([]string, error) {
 }
 
 func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noDeps bool) ([]*npm.Package, error) {
+	var pkgs []*npm.Package
 	var pkgCache sync.Map
-	var visited = make(map[string]struct{})
+	var visitedResolved = make(map[string]struct{})
 
-	var resolveRecursive func(pkgSpec string, depth int) error
-	resolveRecursive = func(pkgSpec string, depth int) error {
-		if _, ok := visited[pkgSpec]; ok {
-			name := pkgSpec
+	var resolveDependencies func(pkgSpec string, depth int) error
+	resolveDependencies = func(pkgSpec string, depth int) error {
+		var pkg *npm.Package
+		var err error
+
+		if val, ok := pkgCache.Load(pkgSpec); ok {
+			pkg = val.(*npm.Package)
+		} else {
+			pkg, err = npm.FetchPackageMetadata(ctx, pkgSpec)
+			if err != nil {
+				logln() // output spacer
+				return err
+			}
+			pkgCache.Store(pkgSpec, pkg)
+			resolvedSpec := pkg.Name + "@" + pkg.Version
+			if pkgSpec != resolvedSpec {
+				pkgCache.Store(resolvedSpec, pkg)
+			}
+		}
+
+		resolvedSpec := pkg.Name + "@" + pkg.Version
+		if _, ok := visitedResolved[resolvedSpec]; ok {
+			name := fmt.Sprintf("%s -> %s", pkgSpec, pkg.Version)
 			meta := "[DUPLICATE]"
 			if useColor() {
 				name = ansiCyan + name + ansiReset
@@ -145,26 +165,8 @@ func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noD
 			}
 			return nil
 		}
-		visited[pkgSpec] = struct{}{} // struct{}{} uses 0 memory, it contains no data
-
-		var pkg *npm.Package
-		var err error
-		var ok bool
-
-		val, ok := pkgCache.Load(pkgSpec)
-		if ok {
-			pkg, ok = val.(*npm.Package)
-			if !ok {
-				panic("map should always be of type *npm.Package")
-			}
-		} else {
-			pkg, err = npm.FetchPackageMetadata(ctx, pkgSpec)
-			if err != nil {
-				logln() // output spacer
-				return err
-			}
-			pkgCache.Store(pkgSpec, pkg)
-		}
+		visitedResolved[resolvedSpec] = struct{}{}
+		pkgs = append(pkgs, pkg)
 
 		name := fmt.Sprintf("%s -> %s", pkgSpec, pkg.Version)
 		meta := fmt.Sprintf("| %s • %d files", npm.FormatSize(pkg.Dist.UnpackedSize), pkg.Dist.FileCount)
@@ -204,12 +206,8 @@ func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noD
 		// pre-fetch dependency data concurrently
 		for name, constraint := range allDependencies {
 			subSpec := npm.ResolveSpec(name, constraint)
-			if _, ok = visited[subSpec]; ok {
-				continue
-			}
 
-			_, ok := pkgCache.Load(subSpec)
-			if !ok {
+			if _, ok := pkgCache.Load(subSpec); !ok {
 				wg.Go(func() {
 					subPkg, err := npm.FetchPackageMetadata(ctx, subSpec)
 					if err != nil {
@@ -227,10 +225,9 @@ func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noD
 			return fmt.Errorf("failed to fetch pkg: %w", fetchErr)
 		}
 
-		// resolve dependencies recursively
 		for name, constraint := range allDependencies {
 			subSpec := npm.ResolveSpec(name, constraint)
-			err = resolveRecursive(subSpec, depth+1)
+			err = resolveDependencies(subSpec, depth+1)
 			if err != nil {
 				return err
 			}
@@ -239,24 +236,12 @@ func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noD
 		return nil
 	}
 
-	// initiate recursive dependency lookup
 	for _, spec := range pkgSpecs {
-		err := resolveRecursive(spec, 0)
+		err := resolveDependencies(spec, 0)
 		if err != nil {
 			return nil, err
 		}
 	}
-
-	// generate complete pkg list
-	var pkgs []*npm.Package
-	pkgCache.Range(func(key, value any) bool {
-		pkg, ok := value.(*npm.Package)
-		if !ok {
-			panic("map should always be of type *npm.Package")
-		}
-		pkgs = append(pkgs, pkg)
-		return true
-	})
 
 	return pkgs, nil
 }
@@ -272,14 +257,20 @@ func createBundle(ctx context.Context, pkgs []*npm.Package, output string, sanit
 		return strings.Compare(aName, bName)
 	})
 
-	// create digest from pkgs
+	// create digest
 	h := sha256.New()
+	fmt.Fprintf(h, "sanitize:%v\n", sanitize)
 	for _, pkg := range pkgs {
-		fmt.Fprintf(h, "%s@%s\n", pkg.Name, pkg.Version)
+		fmt.Fprintf(h, "package:%s@%s\n", pkg.Name, pkg.Version)
 	}
 	digest := hex.EncodeToString(h.Sum(nil)[:12])
 
 	tmpDir := filepath.Join(os.TempDir(), program+"-"+digest)
+
+	err := os.MkdirAll(tmpDir, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create output directory %s: %w", tmpDir, err)
+	}
 
 	var taskC = make(chan *npm.Package, 120)
 	var wg sync.WaitGroup
@@ -339,19 +330,20 @@ func createBundle(ctx context.Context, pkgs []*npm.Package, output string, sanit
 
 	// enqueue all packages
 	for _, pkg := range pkgs {
-		taskC <- pkg
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			taskC <- pkg
+		}
 	}
 	close(taskC)
 
 	wg.Wait() // wait for worker(s) to complete
 
 	// include script in output
-	b, err := scriptFS.ReadFile("publish.sh")
-	if err != nil {
-		return err
-	}
 	path := filepath.Join(tmpDir, "publish.sh")
-	err = os.WriteFile(path, b, 0755)
+	err = os.WriteFile(path, publishScript, 0755)
 	if err != nil {
 		return err
 	}

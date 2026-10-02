@@ -34,7 +34,6 @@ type Package struct {
 	Version              string            `json:"version"`
 	Dist                 PackageDist       `json:"dist"`
 	Dependencies         map[string]string `json:"dependencies"`
-	DevDependencies      map[string]string `json:"devDependencies"`
 	PeerDependencies     map[string]string `json:"peerDependencies"`
 	OptionalDependencies map[string]string `json:"optionalDependencies"`
 }
@@ -152,12 +151,12 @@ func DownloadTarball(ctx context.Context, pkg *Package, outputDir string, saniti
 
 	req, err := http.NewRequestWithContext(ctx, "GET", pkg.Dist.Tarball, nil)
 	if err != nil {
-		return 0, fmt.Errorf("failed to create request for %s: %w", pkg.Dist.Tarball, err)
+		return 0, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("failed to download tarball from %s: %w", pkg.Dist.Tarball, err)
+		return 0, fmt.Errorf("failed to download tarball: %w", err)
 	}
 	defer resp.Body.Close()
 
