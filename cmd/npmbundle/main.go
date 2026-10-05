@@ -5,7 +5,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
-	_ "embed"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -21,12 +20,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/leandergangso/npmbundle/npm"
+	"github.com/leandergangso/npmbundle/internal/assets"
+	"github.com/leandergangso/npmbundle/internal/npm"
 	"golang.org/x/term"
 )
-
-//go:embed publish.sh
-var publishScript []byte
 
 const (
 	ansiReset  = "\033[0m"
@@ -376,8 +373,17 @@ func createBundle(ctx context.Context, pkgs []*npm.Package, output string, sanit
 	wg.Wait() // wait for worker(s) to complete
 
 	// include script in output
+	publishScript := assets.MustReadFile("publish.sh")
 	path := filepath.Join(tmpDir, "publish.sh")
 	err = os.WriteFile(path, publishScript, 0755)
+	if err != nil {
+		return err
+	}
+
+	// include README.md in output
+	readme := assets.MustReadFile("README.md")
+	path = filepath.Join(tmpDir, "README.md")
+	err = os.WriteFile(path, readme, 0644)
 	if err != nil {
 		return err
 	}
