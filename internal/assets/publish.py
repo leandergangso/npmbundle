@@ -50,8 +50,8 @@ def main() -> int:
     total = len(packages)
 
     for current, package in enumerate(packages, 1):
-        name, version, status = inspect_package(package, registry)
-        inspected.append((package, name, version, status))
+        name, version, status, publish = inspect_package(package, registry)
+        inspected.append((package, name, version, status, publish))
         if name and version:
             print_package_status(current, total, package, name, version, status)
     print()
@@ -61,8 +61,8 @@ def main() -> int:
         print(f"==> Inspection failed: {len(invalid)} " f"invalid package(s).")
         return 1
 
-    to_publish = [item for item in inspected if item[3] == "PUBLISH"]
-    skipped = [item for item in inspected if item[3] == "SKIPPED"]
+    to_publish = [item for item in inspected if item[4] == True]
+    skipped = [item for item in inspected if item[4] == False]
 
     if not args.execute:
         print("==> Dry run: no packages were published.")
@@ -76,12 +76,61 @@ def main() -> int:
         print("==> Nothing to publish.")
         return 0
 
+    print("==> Publishing")
+    print(f"    Ready:   {len(to_publish)}")
+    print(f"    Skipped: {len(skipped)}")
+    print()
+
     return publish_packages(
         to_publish,
         registry,
         args.tag,
         len(skipped),
     )
+
+
+def publish_packages(
+    packages: list[tuple[Path, str, str, str, bool]],
+    registry: str,
+    tag: Optional[str],
+    skipped_count: int,
+) -> int:
+    success_count = 0
+    fail_count = 0
+    failed = []
+
+    for package, name, version, _, _ in packages:
+        publish_tag: str
+        if tag:
+            publish_tag = tag
+        else:
+            publish_tag = "archive"
+
+        print(f"{name}@{version}", end="    ")
+
+        if npm_publish(package, registry, publish_tag):
+            print(f"[OK]", end="")
+            success_count += 1
+        else:
+            print(f"[FAIL]", end="")
+            fail_count += 1
+            failed.append(f"{name}@{version} ({package.name})")
+        print()
+
+    print()
+    print("==> Publish Summary:")
+    print(f"    Success: {success_count}")
+    print(f"    Skipped: {skipped_count} (already existed)")
+    print(f"    Failed:  {fail_count}")
+
+    if failed:
+        print()
+        print("==> Failed Packages:")
+        for package in failed:
+            print(f"    {package}")
+        return 1
+
+    return 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -138,67 +187,17 @@ def print_package_status(
     print(f"[{current:>{width}}/{total}] " f"{identity:<46}  {status}")
 
 
-def publish_packages(
-    packages: list[tuple[Path, str, str, str]],
-    registry: str,
-    tag: Optional[str],
-    skipped_count: int,
-) -> int:
-    success_count = 0
-    fail_count = 0
-    failed = []
-
-    print("==> Publishing")
-    print()
-
-    for package, name, version, _ in packages:
-        publish_tag: str
-        if tag:
-            publish_tag = tag
-        else:
-            publish_tag = "archive"
-
-        print(f"[PUBLISH] {name}@{version} --tag {publish_tag}")
-
-        if npm_publish(package, registry, publish_tag):
-            print(f"[OK]      {name}@{version}")
-            success_count += 1
-        else:
-            print(f"[FAIL]    {name}@{version}")
-            fail_count += 1
-            failed.append(f"{name}@{version} ({package.name})")
-
-    print()
-    print("==> Publish Summary:")
-    print(f"    Success: {success_count}")
-    print(f"    Skipped: {skipped_count} (already existed)")
-    print(f"    Failed:  {fail_count}")
-
-    if failed:
-        print()
-        print("==> Failed Packages:")
-        for package in failed:
-            print(f"    - {package}")
-        return 1
-
-    return 0
-
-
-def inspect_package(package: Path, registry: str) -> tuple[str, str, str]:
+def inspect_package(package: Path, registry: str) -> tuple[str, str, str, bool]:
     try:
         package_name, package_version = read_package_metadata(package)
     except ValueError as exc:
-        return "", "", f"INVALID: {exc}"
+        return "", "", f"  INVALID: {exc}", False
 
     existing = npm_view(package_name, package_version, registry)
     if existing is not None:
-        return package_name, package_version, " SKIPPED"
+        return package_name, package_version, "  EXISTS", False
 
-    return (
-        package_name,
-        package_version,
-        f"+PUBLISH",
-    )
+    return package_name, package_version, f"+ READY", True
 
 
 def check_python() -> str:
@@ -320,13 +319,12 @@ def npm_publish(package: Path, registry: str, tag: str) -> bool:
     command = [
         "npm",
         "publish",
-        str(package),
+        f"./{str(package)}",
         f"--registry={registry}",
-        "--fetch-retires=0",
+        "--fetch-retries=0",
         "--ignore-scripts",
         "--access=public",
         "--provenance=false",
-        "--silent",
         "--tag",
         tag,
     ]
