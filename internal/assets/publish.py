@@ -325,6 +325,7 @@ def npm_publish(package: Path, registry: str, tag: str) -> bool:
         "--ignore-scripts",
         "--access=public",
         "--provenance=false",
+        "--silent",
         "--tag",
         tag,
     ]
