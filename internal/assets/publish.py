@@ -7,79 +7,111 @@ import subprocess
 import sys
 import tarfile
 from pathlib import Path
-from typing import Optional
+from dataclasses import dataclass
 from time import sleep
+from typing import TypeIs
 
-MIN_PYTHON = (3, 9)
+
+@dataclass
+class Error:
+    error: str
+
+
+@dataclass
+class PackageInfo:
+    path: Path
+    name: str
+    version: str
+
+
+@dataclass
+class Inspection:
+    package: PackageInfo
+    exists: bool
+    is_latest: bool
+
+
+MIN_PYTHON = (3, 13)
+MIN_NPM = (10, 0)
 
 
 def main() -> int:
-    python_version = check_python()
+    res = check_environment()
+    if is_error(res):
+        error(res.error)
+        return 1
+    python_version, npm_version = res
 
     args = parse_args()
 
-    if not command_exists("npm"):
-        print("Error: npm command not found.", file=sys.stderr)
-        return 1
-
     registry = args.registry or get_default_registry()
 
-    try:
-        packages = find_packages(args.package_dir)
-    except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+    res = find_packages(args.package_dir)
+    if is_error(res):
+        error(res.error)
         return 1
+    packages = res
 
-    print()
-    print("npmbundle publisher")
-    print()
-    print("Environment:")
-    print(f"  Python: {python_version:<12} OK")
-    print(f"  npm:    {get_npm_version():<12} OK")
-    print()
-    print(f"==> Found {len(packages)} package(s)")
-    print(f"==> Registry: {registry}")
-    print()
+    log()
+    log("npmbundle publisher")
+    log()
+    log("Environment:")
+    log(f"  Python: {python_version:<12} OK")
+    log(f"  npm:    {npm_version:<12} OK")
+    log()
+    log(f"==> Found {len(packages)} package(s)")
+    log(f"==> Registry: {registry}")
+    log()
     if not args.execute:
-        print("==> Dry run: no packages will be published.")
-        print("    Use --execute to publish.")
-        print()
-        sleep(1)
+        log("==> Dry run: no packages will be published.")
+        log("    Use --execute to publish.")
+        log()
+        sleep(1)  # give user time to read
 
-    inspected = []
+    inspected: list[Inspection] = []
     total = len(packages)
 
     for current, package in enumerate(packages, 1):
-        name, version, status, publish = inspect_package(package, registry)
-        inspected.append((package, name, version, status, publish))
-        if name and version:
-            print_package_status(current, total, package, name, version, status)
-    print()
+        res = inspect_package(package, registry)
+        if is_error(res):
+            error(res.error)
+            return 1
 
-    invalid = [item for item in inspected if item[3].startswith("INVALID")]
-    if invalid:
-        print(f"==> Inspection failed: {len(invalid)} " f"invalid package(s).")
-        return 1
+        # inspected.append((package, name, version, status, publish))
+        inspected.append(res)
+        if res.package.name and res.package.version:
+            # FIX:
+            # print_package_status(current, total, package, name, version, status)
+            pass
+    log()
 
-    to_publish = [item for item in inspected if item[4] == True]
-    skipped = [item for item in inspected if item[4] == False]
+    # invalid = [item for item in inspected if item[3].startswith("INVALID")]
+    # if invalid:
+    #    log(f"==> Inspection failed: {len(invalid)} " f"invalid package(s).")
+    #    return 1
+
+    # FIX:
+    # to_publish = [item for item in inspected if item[4]]
+    to_publish = [item for item in inspected]
+    # skipped = [item for item in inspected if not item[4]]
+    skipped = [item for item in inspected]
 
     if not args.execute:
-        print("==> Dry run: no packages were published.")
-        print(f"    Ready:   {len(to_publish)}")
-        print(f"    Skipped: {len(skipped)}")
-        print()
-        print("Use --execute to publish.")
+        log()
+        log(f"    Ready:   {len(to_publish)}")
+        log(f"    Skipped: {len(skipped)}")
+        log()
+        log("Use --execute to publish.")
         return 0
 
     if not to_publish:
-        print("==> Nothing to publish.")
+        log("==> Nothing to publish.")
         return 0
 
-    print("==> Publishing")
-    print(f"    Ready:   {len(to_publish)}")
-    print(f"    Skipped: {len(skipped)}")
-    print()
+    log("==> Publishing")
+    log(f"    Ready:   {len(to_publish)}")
+    log(f"    Skipped: {len(skipped)}")
+    log()
 
     return publish_packages(
         to_publish,
@@ -90,47 +122,58 @@ def main() -> int:
 
 
 def publish_packages(
-    packages: list[tuple[Path, str, str, str, bool]],
+    # packages: list[tuple[Path, str, str, bool, str, bool]],
+    packages: list[Inspection],
     registry: str,
-    tag: Optional[str],
+    tag: str | None,
     skipped_count: int,
 ) -> int:
     success_count = 0
     fail_count = 0
     failed = []
 
-    for package, name, version, _, _ in packages:
-        publish_tag: str
-        if tag:
-            publish_tag = tag
-        else:
-            publish_tag = "archive"
+    for info in packages:
+        pkg = info.package
+        publish_tag = "latest" if info.is_latest else tag or "archive"
+        log(f"{pkg.name}@{pkg.version}", end="    ")
 
-        print(f"{name}@{version}", end="    ")
-
-        if npm_publish(package, registry, publish_tag):
-            print(f"[OK]", end="")
+        if npm_publish(pkg.path, registry, publish_tag):
+            log(f"[OK]", end="")
             success_count += 1
         else:
-            print(f"[FAIL]", end="")
+            log(f"[FAIL]", end="")
+            log()
             fail_count += 1
-            failed.append(f"{name}@{version} ({package.name})")
-        print()
+            failed.append(f"{pkg.name}@{pkg.version} ({pkg.name})")
 
-    print()
-    print("==> Publish Summary:")
-    print(f"    Success: {success_count}")
-    print(f"    Skipped: {skipped_count} (already existed)")
-    print(f"    Failed:  {fail_count}")
+        log()
+
+    log()
+    log("==> Publish Summary:")
+    log(f"    Success: {success_count}")
+    log(f"    Skipped: {skipped_count} (already existed)")
+    log(f"    Failed:  {fail_count}")
 
     if failed:
-        print()
-        print("==> Failed Packages:")
+        log()
+        log("==> Failed Packages:")
         for package in failed:
-            print(f"    {package}")
+            log(f"    {package}")
         return 1
 
     return 0
+
+
+def inspect_package(package: Path, registry: str) -> Inspection | Error:
+    res = read_package_metadata(package)
+    if is_error(res):
+        return res
+    package_name, package_version = res
+
+    exists, is_latest = npm_version_exists(package_name, package_version, registry)
+    if exists:
+        return package_name, package_version, "  EXISTS", False
+    return package_name, package_version, "+ READY", True
 
 
 def parse_args() -> argparse.Namespace:
@@ -183,46 +226,41 @@ def print_package_status(
         identity = package.name
 
     width = len(str(total))
-
-    print(f"[{current:>{width}}/{total}] " f"{identity:<46}  {status}")
-
-
-def inspect_package(package: Path, registry: str) -> tuple[str, str, str, bool]:
-    try:
-        package_name, package_version = read_package_metadata(package)
-    except ValueError as exc:
-        return "", "", f"  INVALID: {exc}", False
-
-    existing = npm_view(package_name, package_version, registry)
-    if existing is not None:
-        return package_name, package_version, "  EXISTS", False
-
-    return package_name, package_version, f"+ READY", True
+    log(f"[{current:>{width}}/{total}] " f"{identity:<46}  {status}")
 
 
-def check_python() -> str:
+def check_environment() -> tuple[str, str] | Error:
     if sys.version_info < MIN_PYTHON:
-        sys.exit(
-            f"Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer is required "
-            f"(found {sys.version_info.major}.{sys.version_info.minor})."
+        return Error(
+            f"Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]} or newer is required (found {sys.version_info.major}.{sys.version_info.minor})"
         )
-    return (
+
+    python_version = (
         f"{sys.version_info.major}."
         f"{sys.version_info.minor}."
         f"{sys.version_info.micro}"
     )
 
+    npm_version = get_npm_version()
+    npm_major, npm_minor = map(
+        int,
+        npm_version.split(".")[:2],
+    )
 
-def command_exists(name: str) -> bool:
-    return shutil.which(name) is not None
+    if (npm_major, npm_minor) < MIN_NPM:
+        return Error(
+            f"npm {MIN_NPM[0]}.{MIN_NPM[1]} or newer is required (found {npm_version})"
+        )
+
+    return python_version, npm_version
 
 
-def find_packages(directory: Path) -> list[Path]:
+def find_packages(directory: Path) -> list[Path] | Error:
     if not directory.exists():
-        raise ValueError(f"directory '{directory}' not found")
+        return Error(f"directory '{directory}' not found")
 
     if not directory.is_dir():
-        raise ValueError(f"'{directory}' is not a directory")
+        return Error(f"'{directory}' is not a directory")
 
     packages = sorted(
         [
@@ -232,39 +270,39 @@ def find_packages(directory: Path) -> list[Path]:
     )
 
     if not packages:
-        raise ValueError(f"no package archives found in '{directory}'")
+        return Error(f"no package archives found in '{directory}'")
 
     return packages
 
 
-def read_package_metadata(path: Path) -> tuple[str, str]:
+def read_package_metadata(path: Path) -> tuple[str, str] | Error:
     try:
         with tarfile.open(path, mode="r:gz") as archive:
             member = find_package_json(archive)
 
             if not member.isfile():
-                raise ValueError("package.json is not a regular file")
+                return Error("package.json is not a regular file")
 
             file = archive.extractfile(member)
 
             if file is None:
-                raise ValueError("unable to read package.json")
+                return Error("unable to read package.json")
 
             metadata = json.load(file)
 
     except tarfile.TarError as exc:
-        raise ValueError(f"invalid tar archive: {exc}") from exc
+        return Error(f"invalid tar archive: {exc}")
     except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid package.json: {exc}") from exc
+        return Error(f"invalid package.json: {exc}")
 
     name = metadata.get("name")
     version = metadata.get("version")
 
     if not isinstance(name, str) or not name:
-        raise ValueError("package.json has no valid 'name'")
+        return Error("package.json has no valid 'name'")
 
     if not isinstance(version, str) or not version:
-        raise ValueError("package.json has no valid 'version'")
+        return Error("package.json has no valid 'version'")
 
     return name, version
 
@@ -291,13 +329,17 @@ def find_package_json(archive: tarfile.TarFile) -> tarfile.TarInfo:
     return candidates[0]
 
 
-def npm_view(name: str, version: str, registry: str) -> Optional[str]:
+def npm_version_exists(
+    name: str, version: str, registry: str
+) -> tuple[bool, bool] | Error:
     result = run_command(
         [
             "npm",
             "view",
             f"{name}@{version}",
             "version",
+            "versions",
+            "--json",
             "--fetch-retries=0",
             f"--registry={registry}",
         ],
@@ -305,25 +347,27 @@ def npm_view(name: str, version: str, registry: str) -> Optional[str]:
     )
 
     if result.returncode != 0:
-        return None
+        if "E404" in result.stderr:
+            return False, False
+        return Error(result.stderr)
 
     version_output = result.stdout.strip()
-
     if not version_output:
-        return None
+        return False, False
 
-    return version_output
+    # TODO: check if latest tag
+
+    return True, False
 
 
 def npm_publish(package: Path, registry: str, tag: str) -> bool:
     command = [
         "npm",
         "publish",
-        f"./{str(package)}",
+        f"./{package}",
         f"--registry={registry}",
         "--fetch-retries=0",
         "--ignore-scripts",
-        "--access=public",
         "--provenance=false",
         "--silent",
         "--tag",
@@ -352,9 +396,17 @@ def get_npm_version() -> str:
     )
 
     if result.returncode != 0:
-        return "unknown"
+        error("unable to determine npm version")
+        if result.stderr:
+            log(result.stderr)
+        sys.exit(1)
 
-    return result.stdout.strip()
+    version = result.stdout.strip()
+    if not version:
+        error("npm returned no version")
+        sys.exit(1)
+
+    return version
 
 
 def run_command(
@@ -370,13 +422,33 @@ def run_command(
             capture_output=capture_output,
         )
     except OSError as exc:
-        print(f"Error running command: {exc}", file=sys.stderr)
+        error(f"running command {exc}")
         sys.exit(1)
 
 
+def command_exists(name: str) -> bool:
+    return shutil.which(name) is not None
+
+
+def log(message: str = "", end="\n") -> None:
+    print(message, end=end, file=sys.stderr)
+
+
+def error(message: str = "") -> None:
+    print(f"Error: {message}", file=sys.stderr)
+
+
+def is_error(value) -> TypeIs[Error]:
+    return isinstance(value, Error)
+
+
 if __name__ == "__main__":
+    if not command_exists("npm"):
+        error("npm command not found")
+        sys.exit(1)
+
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        print("\nInterrupted.", file=sys.stderr)
+        log("\nInterrupted")
         sys.exit(130)
