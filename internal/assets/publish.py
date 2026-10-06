@@ -163,17 +163,17 @@ def publish_packages(
     for info in packages:
         pkg = info.package
         publish_tag = "latest" if info.is_latest else tag or "archive"
-        log(f"{pkg.name}@{pkg.version}", end="    ")
 
         err = npm_publish(pkg.path, registry, publish_tag)
         if is_error(err):
-            log(f"[FAIL]", end="")
+            log(f"[FAIL] ", end="")
             fail_count += 1
             failed.append(f"{pkg.name}@{pkg.version} ({pkg.path.name})")
         else:
-            log(f"[OK]", end="")
+            log(f"[OK] ", end="")
             success_count += 1
-        log()
+
+        log(f"{pkg.name}@{pkg.version}")
 
     log()
     log("==> Publish Summary:")
@@ -256,9 +256,6 @@ def print_package_status(
         status = "EXISTS"
     else:
         status = "+ READY"
-
-    if info.is_latest and not info.exists:
-        status += "    latest"
 
     width = len(str(total))
     log(f"[{current:>{width}}/{total}] " f"{identity:<46}  {status}")
