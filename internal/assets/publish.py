@@ -67,14 +67,18 @@ MIN_NPM = (10, 0)
 
 
 def main() -> int:
+    args = parse_args()
+
+    if not command_exists("npm"):
+        error("npm command not found")
+        return 1
+
     info = check_environment()
     if is_error(info):
         error(info.error)
         return 1
 
     python_version, npm_version = info
-
-    args = parse_args()
 
     registry = get_registry(args.registry)
     if is_error(registry):
@@ -97,11 +101,9 @@ def main() -> int:
     log(f"==> Registry: {registry}")
     log()
 
-    if not args.execute:
-        log("==> Dry run: no packages will be published.")
-        log("    Use --execute to publish.")
+    if args.dry_run:
+        log("==> Dry run: no packages will be published")
         log()
-        sleep(1)  # give user time to read
 
     total = len(packages)
     inspected: list[Inspection] = []
@@ -122,16 +124,15 @@ def main() -> int:
     to_publish = [item for item in inspected if not item.exists]
     skipped = [item for item in inspected if item.exists]
 
-    if not args.execute:
-        log()
+    if args.dry_run:
+        log("==> Dry run")
         log(f"    Ready:   {len(to_publish)}")
         log(f"    Skipped: {len(skipped)}")
         log()
-        log("Use --execute to publish.")
         return 0
 
     if not to_publish:
-        log("==> Nothing to publish.")
+        log("==> Nothing to publish")
         return 0
 
     log("==> Publishing")
@@ -163,7 +164,7 @@ def publish_packages(
 
     total = len(packages)
 
-    for current, info in enumerate(packages):
+    for current, info in enumerate(packages, 1):
         pkg = info.package
         publish_tag = "latest" if info.is_latest else tag or "archive"
 
@@ -238,9 +239,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "--execute",
+        "--dry-run",
         action="store_true",
-        help="actually publish packages; without this flag only inspect",
+        help="inspect packages without publishing",
     )
 
     if len(sys.argv) == 1:
@@ -279,10 +280,7 @@ def check_environment() -> tuple[str, str] | Error:
         return npm_version
 
     try:
-        npm_major, npm_minor = map(
-            int,
-            npm_version.split(".")[:2],
-        )
+        npm_major, npm_minor = map(int, npm_version.split(".")[:2])
     except ValueError:
         return Error(f"invalid npm version returned: {npm_version}")
 
@@ -551,10 +549,6 @@ def is_error(value: object) -> TypeIs[Error]:
 
 
 if __name__ == "__main__":
-    if not command_exists("npm"):
-        error("npm command not found")
-        sys.exit(1)
-
     try:
         sys.exit(main())
     except KeyboardInterrupt:
