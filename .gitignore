@@ -1,4 +1,7 @@
 npmpkgs/
+npmbundle/
+npmbundle*/
+package/
 
 npmpack
 
