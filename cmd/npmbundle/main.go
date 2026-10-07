@@ -207,8 +207,11 @@ func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noD
 
 		allDependencies := make(map[string]string)
 		maps.Copy(allDependencies, pkg.Dependencies)
-		maps.Copy(allDependencies, pkg.PeerDependencies)
-		maps.Copy(allDependencies, pkg.OptionalDependencies)
+		if depth == 0 {
+			// only for top level deps
+			maps.Copy(allDependencies, pkg.PeerDependencies)
+			maps.Copy(allDependencies, pkg.OptionalDependencies)
+		}
 
 		if noDeps {
 			meta := fmt.Sprintf("[NO-DEPS] ignored %d direct dependencies", len(allDependencies))
