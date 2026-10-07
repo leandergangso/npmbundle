@@ -9,7 +9,6 @@ import tarfile
 from pathlib import Path
 from typing import TypeIs
 from dataclasses import dataclass
-from time import sleep
 
 
 @dataclass(frozen=True)
@@ -36,29 +35,22 @@ class SemVer:
     major: int
     minor: int
     patch: int
-    prerelease: str | None
+    prerelease: bool
 
     @classmethod
-    def parse(cls, value: str) -> SemVer | Error:
-        core, separator, prerelease = value.partition("-")
-
-        if separator and not prerelease:
-            return Error(f"invalid version '{value}': empty prerelease")
-
-        core = core.split("+", 1)[0]  # Ignore build metadata for precedence.
-
-        parts = core.split(".")
-        if len(parts) != 3:
-            return Error(f"invalid version '{value}': " "expected major.minor.patch")
-
-        if not all(part.isdigit() for part in parts):
-            return Error(f"invalid version '{value}': " "invalid numeric component")
-
+    def parse(cls, value: str) -> SemVer:
+        """
+        parse npm package versions, we assume the version is already valid semver.
+        prereleases should not have latest tag so simplifies this logic.
+        """
+        core = value.split("+", 1)[0]
+        core, separator, _ = core.partition("-")
+        major, minor, patch = core.split(".")
         return cls(
-            major=int(parts[0]),
-            minor=int(parts[1]),
-            patch=int(parts[2]),
-            prerelease=prerelease if separator else None,
+            major=int(major),
+            minor=int(minor),
+            patch=int(patch),
+            prerelease=bool(separator),
         )
 
 
@@ -424,9 +416,7 @@ def npm_version_exists(
     parsed_versions.append((version, bundled))
 
     stable_versions = [
-        (value, parsed)
-        for value, parsed in parsed_versions
-        if parsed.prerelease is None
+        (value, parsed) for value, parsed in parsed_versions if not parsed.prerelease
     ]
 
     if not stable_versions:
