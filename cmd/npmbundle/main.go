@@ -373,8 +373,8 @@ func createBundle(ctx context.Context, pkgs []*npm.Package, output string, sanit
 	wg.Wait() // wait for worker(s) to complete
 
 	// include script in output
-	publishScript := assets.MustReadFile("publish.sh")
-	path := filepath.Join(tmpDir, "publish.sh")
+	publishScript := assets.MustReadFile("publish.py")
+	path := filepath.Join(tmpDir, "publish.py")
 	err = os.WriteFile(path, publishScript, 0755)
 	if err != nil {
 		return err
