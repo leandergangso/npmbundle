@@ -162,16 +162,13 @@ def publish_packages(
 
         err = npm_publish(pkg.path, registry, publish_tag)
         if is_error(err):
-            status = f"[FAIL: {err}]"
-            # log(f"[FAIL] ", end="")
+            status = f"FAIL: {err}"
             fail_count += 1
             failed.append(f"{pkg.name}@{pkg.version} ({pkg.path.name})")
         else:
-            status = "[OK]"
-            # log(f"[OK] ", end="")
+            status = "OK"
             success_count += 1
 
-        # log(f"{pkg.name}@{pkg.version}")
         print_package_status(current, total, info, status)
 
     log()
