@@ -2,7 +2,7 @@ package assets
 
 import "embed"
 
-//go:embed *.md *.py *.sh
+//go:embed *.md *.py
 var FS embed.FS
 
 func MustReadFile(name string) []byte {

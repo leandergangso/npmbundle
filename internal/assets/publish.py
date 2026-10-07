@@ -113,8 +113,9 @@ def main() -> int:
             return 1
 
         inspected.append(info)
-        if info.package.name and info.package.version:
-            print_package_status(current, total, info)
+
+        status = "EXISTS" if info.exists else "+ READY"
+        print_package_status(current, total, info, status)
 
     log()
 
@@ -160,20 +161,25 @@ def publish_packages(
     fail_count = 0
     failed: list[str] = []
 
-    for info in packages:
+    total = len(packages)
+
+    for current, info in enumerate(packages):
         pkg = info.package
         publish_tag = "latest" if info.is_latest else tag or "archive"
 
         err = npm_publish(pkg.path, registry, publish_tag)
         if is_error(err):
-            log(f"[FAIL] ", end="")
+            status = f"[FAIL: {err}]"
+            # log(f"[FAIL] ", end="")
             fail_count += 1
             failed.append(f"{pkg.name}@{pkg.version} ({pkg.path.name})")
         else:
-            log(f"[OK] ", end="")
+            status = "[OK]"
+            # log(f"[OK] ", end="")
             success_count += 1
 
-        log(f"{pkg.name}@{pkg.version}")
+        # log(f"{pkg.name}@{pkg.version}")
+        print_package_status(current, total, info, status)
 
     log()
     log("==> Publish Summary:")
@@ -248,17 +254,12 @@ def print_package_status(
     current: int,
     total: int,
     info: Inspection,
+    status: str,
 ) -> None:
     pkg = info.package
     identity = f"{pkg.name}@{pkg.version}"
-
-    if info.exists:
-        status = "EXISTS"
-    else:
-        status = "+ READY"
-
     width = len(str(total))
-    log(f"[{current:>{width}}/{total}] " f"{identity:<46}  {status}")
+    log(f"[{current:>{width}}/{total}] " f"{identity:<52}  {status}")
 
 
 def check_environment() -> tuple[str, str] | Error:
@@ -414,7 +415,7 @@ def npm_version_exists(
         parsed = SemVer.parse(value)
         if is_error(parsed):
             return Error(
-                f"registry returned invalid version '{version}': " f"{parsed.error}"
+                f"registry returned invalid version '{value}': " f"{parsed.error}"
             )
         parsed_versions.append((value, parsed))
 
@@ -559,6 +560,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         log("\nInterrupted")
         sys.exit(130)
-    except Exception as exc:
-        log(f"\nUnknown error: {exc}")
-        sys.exit(1)
