@@ -3,7 +3,7 @@ version: 2
 project_name: npmbundle
 
 builds:
-  - main: .
+  - main: ./cmd/npmbundle/
     binary: npmbundle
     goos:
       - linux
