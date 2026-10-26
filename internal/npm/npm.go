@@ -312,31 +312,38 @@ func SplitPackageSpec(spec string) (string, string) {
 
 // ResolveConstraint takes the tag constraint and a list of all available tags and returns the highest allowed tag
 func ResolveConstraint(tagConstraint string, availableVersions []string) (string, error) {
-	var targetV string
-
 	c, err := semver.NewConstraint(tagConstraint)
 	if err != nil {
 		return "", err
 	}
 
 	var maxV *semver.Version
+
 	for _, tag := range availableVersions {
 		v, err := semver.NewVersion(tag)
 		if err != nil {
 			continue
 		}
-		if c.Check(v) {
-			if maxV == nil || v.GreaterThan(maxV) {
-				maxV = v
-			}
+
+		// "*" means any valid semantic version.
+		if tagConstraint != "*" && !c.Check(v) {
+			continue
+		}
+
+		if maxV == nil || v.GreaterThan(maxV) {
+			maxV = v
 		}
 	}
-	if maxV == nil {
-		return "", fmt.Errorf("no version matching constraint '%s'", tagConstraint)
-	}
-	targetV = maxV.Original()
 
-	return targetV, nil
+	if maxV == nil {
+		return "", fmt.Errorf(
+			"no version matching constraint '%s' among %v",
+			tagConstraint,
+			availableVersions,
+		)
+	}
+
+	return maxV.Original(), nil
 }
 
 // FormatSize takes a byte size and returns human formatted string
