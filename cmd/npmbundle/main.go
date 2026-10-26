@@ -65,7 +65,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	pkgs, err := resolvePackages(ctx, pkgSpecs, flags.Tree, flags.NoDeps)
+	pkgs, err := resolvePackages(ctx, pkgSpecs, flags.Tree, flags.NoDeps, flags.NestedDeps)
 	if err != nil {
 		return err
 	}
@@ -122,7 +122,7 @@ func extractPkgsFromArgs(args []string) ([]string, error) {
 	return pkgSpecs, nil
 }
 
-func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noDeps bool) ([]*npm.Package, error) {
+func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noDeps bool, nestedDeps bool) ([]*npm.Package, error) {
 	var pkgs []*npm.Package
 	var pkgCache sync.Map
 	var visitedResolved = make(map[string]struct{})
@@ -207,7 +207,7 @@ func resolvePackages(ctx context.Context, pkgSpecs []string, printTree bool, noD
 
 		allDependencies := make(map[string]string)
 		maps.Copy(allDependencies, pkg.Dependencies)
-		if depth == 0 {
+		if depth == 0 || nestedDeps {
 			// only for top level deps
 			maps.Copy(allDependencies, pkg.PeerDependencies)
 			maps.Copy(allDependencies, pkg.OptionalDependencies)
@@ -470,10 +470,11 @@ func archiveDir(inputDir, outputFile string) error {
 var noColor bool
 
 type flags struct {
-	Output   string
-	Sanitize bool
-	NoDeps   bool
-	Tree     bool
+	Output     string
+	Sanitize   bool
+	NoDeps     bool
+	NestedDeps bool
+	Tree       bool
 }
 
 func parseFlagsAndArgs() (flags, []string) {
@@ -497,6 +498,7 @@ func parseFlagsAndArgs() (flags, []string) {
 	fs.StringVar(&flags.Output, "output", "npmbundle.tgz", "Output tarball path (use \"\" to skip bundling")
 	fs.BoolVar(&flags.Sanitize, "sanitize", false, "Sanitize package.json (removes scripts, repository, etc.)")
 	fs.BoolVar(&flags.NoDeps, "no-deps", false, "Skip bundling dependencies")
+	fs.BoolVar(&flags.NestedDeps, "nested-deps", false, "Include nested dependencies")
 	fs.BoolVar(&flags.Tree, "tree", false, "Display package hierarchy as a nested tree")
 	fs.BoolVar(&noColor, "no-color", false, "Disable colored output")
 

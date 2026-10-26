@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.13
 
 import argparse
 import json
@@ -38,7 +38,7 @@ class SemVer:
     prerelease: bool
 
     @classmethod
-    def parse(cls, value: str) -> SemVer:
+    def parse(cls, value: str):
         """
         parse npm package versions, we assume the version is already valid semver.
         prereleases should not have latest tag so simplifies this logic.
